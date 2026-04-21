@@ -27,6 +27,21 @@ namespace RevitMCP.Plugin
         private CancellationTokenSource _cts;
         private Task _listenTask;
 
+        // Harness Engineering — Tier 1: Idempotency cache.
+        // Prevents duplicate Create/Modify operations when a WebSocket response
+        // is lost mid-transaction and the client retries with the same idempotency
+        // key. Keyed by CommandRequest.Id (or caller-supplied idempotency_key).
+        // Entries expire after IdempotencyTtl to avoid unbounded memory growth.
+        private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromMinutes(15);
+        private readonly Dictionary<string, CachedResult> _idempotencyCache = new();
+        private readonly object _cacheLock = new object();
+
+        private class CachedResult
+        {
+            public string SerializedResponse { get; set; }
+            public DateTime CachedAt { get; set; }
+        }
+
         public RevitWebSocketServer(UIApplication uiApp, int port = 8181)
         {
             _uiApp = uiApp;
@@ -194,6 +209,22 @@ namespace RevitMCP.Plugin
                     });
                 }
 
+                // Harness Engineering — Tier 1: Idempotency check.
+                // If client supplied an idempotency key (or we use request.Id) and we've
+                // already executed this exact request recently, return the cached result
+                // instead of re-executing. Critical for Create/Modify/Delete safety.
+                var idempotencyKey = ResolveIdempotencyKey(request);
+                if (!string.IsNullOrEmpty(idempotencyKey))
+                {
+                    var cached = TryGetCachedResult(idempotencyKey);
+                    if (cached != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[RevitMCP] Idempotency hit: key={idempotencyKey}, command={request.Command}");
+                        return cached;
+                    }
+                }
+
                 // Create cancellation token with timeout
                 using var timeoutCts = new CancellationTokenSource(request.TimeoutMs);
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
@@ -272,12 +303,21 @@ namespace RevitMCP.Plugin
 
                 if (result.Success)
                 {
-                    return JsonSerializer.Serialize(new
+                    var successResponse = JsonSerializer.Serialize(new
                     {
                         id = request.Id,
                         status = "success",
                         data = result.Data
                     });
+
+                    // Cache successful Create/Modify/Delete responses for idempotency.
+                    // Read-only queries don't need caching (no side effects to replay).
+                    if (!string.IsNullOrEmpty(idempotencyKey) && IsSideEffectCommand(request.Command))
+                    {
+                        StoreCachedResult(idempotencyKey, successResponse);
+                    }
+
+                    return successResponse;
                 }
                 else
                 {
@@ -382,6 +422,112 @@ namespace RevitMCP.Plugin
                 }
             }
             return value;
+        }
+
+        // ─── Idempotency cache helpers ────────────────────────────────────────
+
+        /// <summary>
+        /// Resolve the idempotency key for a request. Preference order:
+        ///   1. Explicit "idempotency_key" parameter (caller-supplied)
+        ///   2. Request.Id (WebSocket-level UUID)
+        /// Returns empty string if neither is available (cache disabled for this request).
+        /// </summary>
+        private static string ResolveIdempotencyKey(CommandRequest request)
+        {
+            if (request.Params != null &&
+                request.Params.TryGetValue("idempotency_key", out var keyObj) &&
+                keyObj != null)
+            {
+                var keyStr = keyObj is JsonElement je
+                    ? (je.ValueKind == JsonValueKind.String ? je.GetString() : je.ToString())
+                    : keyObj.ToString();
+                if (!string.IsNullOrWhiteSpace(keyStr))
+                {
+                    return $"{request.Command}:{keyStr}";
+                }
+            }
+
+            return !string.IsNullOrWhiteSpace(request.Id)
+                ? $"{request.Command}:{request.Id}"
+                : "";
+        }
+
+        /// <summary>
+        /// Try to retrieve a cached response for the given idempotency key.
+        /// Returns null if no cached entry exists or the entry has expired.
+        /// </summary>
+        private string TryGetCachedResult(string key)
+        {
+            lock (_cacheLock)
+            {
+                if (!_idempotencyCache.TryGetValue(key, out var cached))
+                    return null;
+
+                if (DateTime.UtcNow - cached.CachedAt > IdempotencyTtl)
+                {
+                    _idempotencyCache.Remove(key);
+                    return null;
+                }
+
+                return cached.SerializedResponse;
+            }
+        }
+
+        /// <summary>
+        /// Store a successful response in the idempotency cache.
+        /// Opportunistically prunes expired entries to keep memory bounded.
+        /// </summary>
+        private void StoreCachedResult(string key, string serializedResponse)
+        {
+            lock (_cacheLock)
+            {
+                _idempotencyCache[key] = new CachedResult
+                {
+                    SerializedResponse = serializedResponse,
+                    CachedAt = DateTime.UtcNow
+                };
+
+                // Opportunistic pruning: clean expired entries every ~50 writes
+                if (_idempotencyCache.Count % 50 == 0)
+                {
+                    var now = DateTime.UtcNow;
+                    var expired = new List<string>();
+                    foreach (var kv in _idempotencyCache)
+                    {
+                        if (now - kv.Value.CachedAt > IdempotencyTtl)
+                            expired.Add(kv.Key);
+                    }
+                    foreach (var k in expired)
+                        _idempotencyCache.Remove(k);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Identify commands that produce side effects (mutations).
+        /// Read-only queries are never cached — they have no replay risk and
+        /// users expect fresh results.
+        /// </summary>
+        private static bool IsSideEffectCommand(string command)
+        {
+            if (string.IsNullOrEmpty(command)) return false;
+
+            // Prefix-based classification — matches our command naming convention
+            return command.StartsWith("create_")
+                || command.StartsWith("modify_")
+                || command.StartsWith("delete_")
+                || command.StartsWith("move_")
+                || command.StartsWith("copy_")
+                || command.StartsWith("mirror_")
+                || command.StartsWith("rotate_")
+                || command.StartsWith("array_")
+                || command.StartsWith("rename_")
+                || command.StartsWith("place_")
+                || command.StartsWith("load_")
+                || command.StartsWith("purge_")
+                || command.StartsWith("set_")
+                || command.StartsWith("batch_create_")
+                || command.StartsWith("fix_");
         }
 
         /// <summary>

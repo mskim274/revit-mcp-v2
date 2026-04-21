@@ -15,7 +15,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { RevitWebSocketClient } from "../services/websocket-client.js";
-import { DEFAULT_TIMEOUT_MS } from "../constants.js";
+import { sendAndFormat } from "../services/response-formatter.js";
 import {
   clampPageSize,
   parseCursor,
@@ -32,40 +32,6 @@ const READ_ONLY_ANNOTATIONS = {
   idempotentHint: true,
   openWorldHint: false,
 } as const;
-
-/**
- * Helper: send command and return formatted MCP text response.
- */
-async function sendAndFormat(
-  wsClient: RevitWebSocketClient,
-  command: string,
-  params: Record<string, unknown> = {},
-  timeoutMs: number = DEFAULT_TIMEOUT_MS
-): Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  const response = await wsClient.sendCommand(command, params, timeoutMs);
-
-  if (response.status === "error") {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Error: ${response.error?.message ?? "Unknown error"}${
-            response.error?.suggestion ? `\nSuggestion: ${response.error.suggestion}` : ""
-          }`,
-        },
-      ],
-    };
-  }
-
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify(response.data, null, 2),
-      },
-    ],
-  };
-}
 
 export function registerQueryTools(
   server: McpServer,

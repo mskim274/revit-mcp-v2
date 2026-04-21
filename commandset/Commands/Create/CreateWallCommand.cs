@@ -90,6 +90,12 @@ namespace RevitMCP.CommandSet.Commands.Create
                     tx.Commit();
                 }
 
+                // Harness Engineering — Tier 1: Post-transaction verification.
+                // After commit, re-query the created wall and compare actual geometry
+                // against requested geometry. Claude can use this to self-correct
+                // if the creation produced unexpected results.
+                var verification = VerifyCreatedWall(doc, wall, startPoint, endPoint, height, level, wallType);
+
                 // Return info about the created wall
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
@@ -108,7 +114,8 @@ namespace RevitMCP.CommandSet.Commands.Create
                     ["end"] = new Dictionary<string, double>
                     {
                         ["x"] = endX, ["y"] = endY
-                    }
+                    },
+                    ["verification"] = verification
                 }));
             }
             catch (OperationCanceledException)
@@ -170,6 +177,112 @@ namespace RevitMCP.CommandSet.Commands.Create
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// Post-transaction verification. Re-queries the created wall and compares
+        /// actual geometry/parameters against the request. Tolerances are in feet.
+        ///
+        /// Returns a structured dictionary with pass/fail per check and a
+        /// geometry_match summary flag. Claude can use this to self-correct.
+        /// </summary>
+        private static Dictionary<string, object> VerifyCreatedWall(
+            Document doc,
+            Wall wall,
+            XYZ expectedStart,
+            XYZ expectedEnd,
+            double expectedHeight,
+            Level expectedLevel,
+            WallType expectedType)
+        {
+            const double POSITION_TOLERANCE = 0.01; // ~3mm in feet
+            const double HEIGHT_TOLERANCE = 0.01;
+
+            var issues = new List<string>();
+            var result = new Dictionary<string, object>
+            {
+                ["performed"] = true,
+                ["geometry_match"] = true
+            };
+
+            try
+            {
+                // Re-fetch the wall to ensure we're reading committed state
+                var refetched = doc.GetElement(wall.Id) as Wall;
+                if (refetched == null)
+                {
+                    result["geometry_match"] = false;
+                    result["issues"] = new List<string> { "Wall not found after commit — creation may have failed." };
+                    return result;
+                }
+
+                // Check location curve
+                var locCurve = refetched.Location as LocationCurve;
+                if (locCurve?.Curve is Line actualLine)
+                {
+                    var actualStart = actualLine.GetEndPoint(0);
+                    var actualEnd = actualLine.GetEndPoint(1);
+
+                    var startDiff = actualStart.DistanceTo(expectedStart);
+                    var endDiff = actualEnd.DistanceTo(expectedEnd);
+
+                    result["actual_start"] = new Dictionary<string, double>
+                    {
+                        ["x"] = Math.Round(actualStart.X, 4),
+                        ["y"] = Math.Round(actualStart.Y, 4),
+                        ["z"] = Math.Round(actualStart.Z, 4)
+                    };
+                    result["actual_end"] = new Dictionary<string, double>
+                    {
+                        ["x"] = Math.Round(actualEnd.X, 4),
+                        ["y"] = Math.Round(actualEnd.Y, 4),
+                        ["z"] = Math.Round(actualEnd.Z, 4)
+                    };
+                    result["start_offset_feet"] = Math.Round(startDiff, 6);
+                    result["end_offset_feet"] = Math.Round(endDiff, 6);
+
+                    if (startDiff > POSITION_TOLERANCE)
+                        issues.Add($"Start point offset by {Math.Round(startDiff * 304.8, 1)}mm from request.");
+                    if (endDiff > POSITION_TOLERANCE)
+                        issues.Add($"End point offset by {Math.Round(endDiff * 304.8, 1)}mm from request.");
+                }
+                else
+                {
+                    issues.Add("Could not read wall location curve.");
+                }
+
+                // Check height
+                var heightParam = refetched.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM);
+                if (heightParam != null)
+                {
+                    var actualHeight = heightParam.AsDouble();
+                    result["actual_height_feet"] = Math.Round(actualHeight, 4);
+                    if (Math.Abs(actualHeight - expectedHeight) > HEIGHT_TOLERANCE)
+                        issues.Add($"Height {Math.Round(actualHeight * 304.8, 1)}mm differs from requested {Math.Round(expectedHeight * 304.8, 1)}mm.");
+                }
+
+                // Check level
+                var levelIdParam = refetched.LevelId;
+                if (levelIdParam != expectedLevel.Id)
+                    issues.Add($"Wall attached to a different level than requested.");
+
+                // Check type
+                if (refetched.WallType?.Id != expectedType.Id)
+                    issues.Add($"Wall type mismatch: expected '{expectedType.Name}'.");
+
+                if (issues.Count > 0)
+                {
+                    result["geometry_match"] = false;
+                    result["issues"] = issues;
+                }
+            }
+            catch (Exception ex)
+            {
+                result["performed"] = false;
+                result["verification_error"] = ex.Message;
+            }
+
+            return result;
         }
     }
 }

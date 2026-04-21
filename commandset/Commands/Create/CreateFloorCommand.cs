@@ -63,6 +63,7 @@ namespace RevitMCP.CommandSet.Commands.Create
                 // Build boundary curve loop
                 CurveLoop boundary;
                 string mode;
+                bool autoFallback = false;
 
                 if (parameters.ContainsKey("points"))
                 {
@@ -91,27 +92,52 @@ namespace RevitMCP.CommandSet.Commands.Create
                         "Invalid boundary definition — could not create valid curve loop.",
                         "Ensure points form a valid closed polygon with no self-intersections."));
 
-                // Create floor
-                Floor floor;
-                using (var tx = new Transaction(doc, "MCP: Create Floor"))
+                // Harness Engineering — Tier 1: Create with auto-fallback.
+                // Known issue: rectangle mode occasionally fails with "Invalid boundary"
+                // even when geometry is valid. Try rectangle first, fall back to polygon
+                // representation (same 4 corners as explicit polygon) if rectangle fails.
+                Floor floor = null;
+                Exception firstError = null;
+
+                try
                 {
-                    tx.Start();
-
-                    var loops = new List<CurveLoop> { boundary };
-                    floor = Floor.Create(doc, loops, floorType.Id, level.Id);
-
-                    if (structural)
-                    {
-                        var param = floor.get_Parameter(BuiltInParameter.FLOOR_PARAM_IS_STRUCTURAL);
-                        if (param != null && !param.IsReadOnly)
-                            param.Set(1);
-                    }
-
-                    tx.Commit();
+                    floor = CreateFloorInTransaction(doc, boundary, floorType, level, structural);
                 }
+                catch (Exception ex) when (mode == "rectangle")
+                {
+                    firstError = ex;
+                    // Rebuild boundary as polygon (4 corner points)
+                    var fallbackBoundary = BuildPolygonFromRectBoundary(boundary);
+                    if (fallbackBoundary != null)
+                    {
+                        try
+                        {
+                            floor = CreateFloorInTransaction(doc, fallbackBoundary, floorType, level, structural);
+                            boundary = fallbackBoundary;
+                            autoFallback = true;
+                            mode = "rectangle→polygon(auto)";
+                        }
+                        catch
+                        {
+                            throw firstError; // Report original error if fallback also fails
+                        }
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+
+                if (floor == null)
+                    return Task.FromResult(CommandResult.Fail(
+                        "Floor creation returned null after transaction.",
+                        "Check boundary validity and floor type compatibility."));
 
                 // Calculate area approximation
                 var area = CalculateLoopArea(boundary);
+
+                // Harness Engineering — Tier 1: Post-transaction verification.
+                var verification = VerifyCreatedFloor(doc, floor, boundary, level, floorType, area);
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
@@ -121,7 +147,9 @@ namespace RevitMCP.CommandSet.Commands.Create
                     ["mode"] = mode,
                     ["approximate_area_sqft"] = Math.Round(area, 2),
                     ["approximate_area_sqm"] = Math.Round(area * 0.0929, 2),
-                    ["structural"] = structural
+                    ["structural"] = structural,
+                    ["auto_fallback_applied"] = autoFallback,
+                    ["verification"] = verification
                 }));
             }
             catch (OperationCanceledException)
@@ -254,6 +282,128 @@ namespace RevitMCP.CommandSet.Commands.Create
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// Encapsulates the floor creation transaction so it can be retried on fallback.
+        /// </summary>
+        private static Floor CreateFloorInTransaction(
+            Document doc,
+            CurveLoop boundary,
+            FloorType floorType,
+            Level level,
+            bool structural)
+        {
+            Floor floor;
+            using (var tx = new Transaction(doc, "MCP: Create Floor"))
+            {
+                tx.Start();
+
+                var loops = new List<CurveLoop> { boundary };
+                floor = Floor.Create(doc, loops, floorType.Id, level.Id);
+
+                if (structural)
+                {
+                    var param = floor.get_Parameter(BuiltInParameter.FLOOR_PARAM_IS_STRUCTURAL);
+                    if (param != null && !param.IsReadOnly)
+                        param.Set(1);
+                }
+
+                tx.Commit();
+            }
+            return floor;
+        }
+
+        /// <summary>
+        /// Build a polygon CurveLoop from a rectangle CurveLoop by extracting
+        /// the 4 corner points. Used as fallback when rectangle mode fails.
+        /// </summary>
+        private static CurveLoop BuildPolygonFromRectBoundary(CurveLoop rectLoop)
+        {
+            var points = new List<XYZ>();
+            foreach (var curve in rectLoop)
+                points.Add(curve.GetEndPoint(0));
+
+            if (points.Count < 3) return null;
+
+            var loop = new CurveLoop();
+            for (int i = 0; i < points.Count; i++)
+            {
+                var next = (i + 1) % points.Count;
+                if (points[i].DistanceTo(points[next]) < 0.001) continue;
+                loop.Append(Line.CreateBound(points[i], points[next]));
+            }
+            return loop;
+        }
+
+        /// <summary>
+        /// Post-transaction verification for created floor.
+        /// Confirms the floor exists, is on the expected level/type, and area is close to expected.
+        /// </summary>
+        private static Dictionary<string, object> VerifyCreatedFloor(
+            Document doc,
+            Floor floor,
+            CurveLoop expectedBoundary,
+            Level expectedLevel,
+            FloorType expectedType,
+            double expectedAreaSqft)
+        {
+            const double AREA_TOLERANCE_RATIO = 0.05; // 5% tolerance on computed area
+
+            var issues = new List<string>();
+            var result = new Dictionary<string, object>
+            {
+                ["performed"] = true,
+                ["geometry_match"] = true
+            };
+
+            try
+            {
+                var refetched = doc.GetElement(floor.Id) as Floor;
+                if (refetched == null)
+                {
+                    result["geometry_match"] = false;
+                    result["issues"] = new List<string> { "Floor not found after commit — creation may have failed." };
+                    return result;
+                }
+
+                // Check level
+                if (refetched.LevelId != expectedLevel.Id)
+                    issues.Add("Floor attached to a different level than requested.");
+
+                // Check type
+                if (refetched.FloorType?.Id != expectedType.Id)
+                    issues.Add($"Floor type mismatch: expected '{expectedType.Name}'.");
+
+                // Check area against the Revit-computed parameter
+                var areaParam = refetched.get_Parameter(BuiltInParameter.HOST_AREA_COMPUTED);
+                if (areaParam != null)
+                {
+                    var actualAreaSqft = areaParam.AsDouble();
+                    result["actual_area_sqft"] = Math.Round(actualAreaSqft, 2);
+
+                    if (expectedAreaSqft > 0.01)
+                    {
+                        var ratio = Math.Abs(actualAreaSqft - expectedAreaSqft) / expectedAreaSqft;
+                        result["area_deviation_ratio"] = Math.Round(ratio, 4);
+                        if (ratio > AREA_TOLERANCE_RATIO)
+                            issues.Add($"Area {Math.Round(actualAreaSqft, 2)}sqft differs from expected {Math.Round(expectedAreaSqft, 2)}sqft by {Math.Round(ratio * 100, 1)}%.");
+                    }
+                }
+
+                if (issues.Count > 0)
+                {
+                    result["geometry_match"] = false;
+                    result["issues"] = issues;
+                }
+            }
+            catch (Exception ex)
+            {
+                result["performed"] = false;
+                result["verification_error"] = ex.Message;
+            }
+
+            return result;
         }
     }
 }
