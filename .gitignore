@@ -26,3 +26,17 @@ Thumbs.db
 
 # Build artifacts
 *.nupkg
+
+# Claude Code session state (local-only)
+.claude/
+
+# Ad-hoc working files / scratch exports
+# (Data dumps, DAX/M expression drafts, generated TMDL — not source)
+scratch/
+*.pbix
+*.pbip
+*.pbit
+/1st_floor_beams.json
+/beam_*.txt
+/expr_*.txt
+/powerbi/
