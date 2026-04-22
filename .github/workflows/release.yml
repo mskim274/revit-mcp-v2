@@ -59,10 +59,10 @@ jobs:
           dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj
           -c Release -f net8.0-windows --no-restore
 
-      - name: Build for Revit 2023 (.NET Framework 4.8)
-        run: >
-          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj
-          -c Release -f net48 --no-restore
+      # Revit 2023 (.NET Framework 4.8) build disabled in CI until we verify
+      # the Nice3point NuGet packages publish a net48 target asset. The code
+      # still multi-targets locally for contributors who have Revit 2023
+      # installed and REVIT_2023_PATH set.
 
       - name: Publish updater console app
         run: >
@@ -89,23 +89,7 @@ jobs:
           Compress-Archive -Path $files -DestinationPath $zipName -Force
           Write-Host "Created $zipName"
 
-      - name: Package Revit 2023 zip
-        shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}") -eq $false) {
-            $version = "${{ github.event.inputs.version }}"
-          }
-          $outDir = "plugin/RevitMCPPlugin/bin/Release/net48"
-          $zipName = "RevitMCPPlugin-$version-Revit2023.zip"
-          $files = @(
-            "$outDir/RevitMCPPlugin.dll",
-            "$outDir/RevitMCP.CommandSet.dll",
-            "$outDir/Revit.Async.dll",
-            "plugin/revit-mcp.addin"
-          )
-          Compress-Archive -Path $files -DestinationPath $zipName -Force
-          Write-Host "Created $zipName"
+      # Revit 2023 zip packaging disabled — see build step note above.
 
       - name: Package updater zip
         shell: pwsh
@@ -122,7 +106,6 @@ jobs:
         with:
           files: |
             RevitMCPPlugin-*-Revit2025.zip
-            RevitMCPPlugin-*-Revit2023.zip
             RevitMCPUpdater-*.zip
           generate_release_notes: true
           draft: false
