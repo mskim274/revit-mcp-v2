@@ -8,8 +8,22 @@
     <AssemblyName>RevitMCP.CommandSet</AssemblyName>
   </PropertyGroup>
 
-  <!-- Revit 2023/2024 (.NET Framework 4.8) -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+  <!-- MinVer: derive AssemblyVersion/FileVersion from the nearest git tag
+       (e.g., v0.2.0 → 0.2.0.0). Required for the auto-update check to
+       compare the running plugin against GitHub Releases. -->
+  <ItemGroup>
+    <PackageReference Include="MinVer" Version="5.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- Revit API references.
+       Local dev (REVIT_202x_PATH set): reference the installed Revit DLLs.
+       CI build  (env var empty):       fall back to Nice3point NuGet stubs. -->
+
+  <!-- Revit 2023/2024 (.NET Framework 4.8) — local -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48' AND '$(REVIT_2023_PATH)' != ''">
     <Reference Include="RevitAPI">
       <HintPath>$(REVIT_2023_PATH)\RevitAPI.dll</HintPath>
       <Private>false</Private>
@@ -20,8 +34,14 @@
     </Reference>
   </ItemGroup>
 
-  <!-- Revit 2025+ (.NET 8.0) -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+  <!-- Revit 2023/2024 — CI fallback -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48' AND '$(REVIT_2023_PATH)' == ''">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2023.*" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2023.*" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Revit 2025+ (.NET 8.0) — local -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' != ''">
     <Reference Include="RevitAPI">
       <HintPath>$(REVIT_2025_PATH)\RevitAPI.dll</HintPath>
       <Private>false</Private>
@@ -30,6 +50,12 @@
       <HintPath>$(REVIT_2025_PATH)\RevitAPIUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <!-- Revit 2025 — CI fallback -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' == ''">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.*" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2025.*" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

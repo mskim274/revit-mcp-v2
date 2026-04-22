@@ -1,0 +1,130 @@
+# Release pipeline — tag-triggered build, package, and GitHub Release.
+#
+# Trigger: pushing a tag matching v*.*.* (e.g., v0.2.0)
+#   git tag v0.2.0
+#   git push origin v0.2.0
+#
+# Outputs:
+#   - RevitMCPPlugin-<version>-Revit2025.zip  (DLLs + .addin)
+#   - RevitMCPPlugin-<version>-Revit2023.zip  (DLLs + .addin)
+#   - RevitMCPUpdater-<version>.zip           (standalone updater)
+#   - GitHub Release with auto-generated notes
+#
+# The plugin's UpdateChecker polls /repos/<owner>/<repo>/releases/latest
+# and uses the first .zip asset matching the installed Revit year.
+#
+# Harness Engineering notes:
+#   - Builds run with empty REVIT_202x_PATH, so csproj falls back to the
+#     Nice3point.Revit.Api NuGet packages. No Revit install required on
+#     the runner.
+#   - MinVer reads the nearest git tag (fetch-depth: 0 is essential).
+#   - `permissions: contents: write` lets action-gh-release create a
+#     release against the default GITHUB_TOKEN — no PAT needed.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g., 0.2.0). Leave empty to use the latest tag.'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout (with full history for MinVer)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore RevitMCP.sln
+
+      - name: Build for Revit 2025 (.NET 8)
+        run: >
+          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj
+          -c Release -f net8.0-windows --no-restore
+
+      - name: Build for Revit 2023 (.NET Framework 4.8)
+        run: >
+          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj
+          -c Release -f net48 --no-restore
+
+      - name: Publish updater console app
+        run: >
+          dotnet publish updater/Updater.csproj
+          -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true
+          -o updater/publish
+
+      - name: Package Revit 2025 zip
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}") -eq $false) {
+            $version = "${{ github.event.inputs.version }}"
+          }
+          $outDir = "plugin/RevitMCPPlugin/bin/Release/net8.0-windows"
+          $zipName = "RevitMCPPlugin-$version-Revit2025.zip"
+          $files = @(
+            "$outDir/RevitMCPPlugin.dll",
+            "$outDir/RevitMCP.CommandSet.dll",
+            "$outDir/Revit.Async.dll",
+            "plugin/revit-mcp.addin"
+          )
+          Compress-Archive -Path $files -DestinationPath $zipName -Force
+          Write-Host "Created $zipName"
+
+      - name: Package Revit 2023 zip
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}") -eq $false) {
+            $version = "${{ github.event.inputs.version }}"
+          }
+          $outDir = "plugin/RevitMCPPlugin/bin/Release/net48"
+          $zipName = "RevitMCPPlugin-$version-Revit2023.zip"
+          $files = @(
+            "$outDir/RevitMCPPlugin.dll",
+            "$outDir/RevitMCP.CommandSet.dll",
+            "$outDir/Revit.Async.dll",
+            "plugin/revit-mcp.addin"
+          )
+          Compress-Archive -Path $files -DestinationPath $zipName -Force
+          Write-Host "Created $zipName"
+
+      - name: Package updater zip
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}") -eq $false) {
+            $version = "${{ github.event.inputs.version }}"
+          }
+          Compress-Archive -Path "updater/publish/*" `
+            -DestinationPath "RevitMCPUpdater-$version.zip" -Force
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            RevitMCPPlugin-*-Revit2025.zip
+            RevitMCPPlugin-*-Revit2023.zip
+            RevitMCPUpdater-*.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
