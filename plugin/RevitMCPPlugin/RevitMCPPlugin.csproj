@@ -7,6 +7,8 @@
     <RootNamespace>RevitMCP.Plugin</RootNamespace>
     <AssemblyName>RevitMCPPlugin</AssemblyName>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- WPF needed for the auto-update notification window (P0). -->
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
 
   <!-- Revit 2023/2024 (.NET Framework 4.8) -->
