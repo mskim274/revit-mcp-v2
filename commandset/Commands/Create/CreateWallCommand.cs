@@ -94,7 +94,12 @@ namespace RevitMCP.CommandSet.Commands.Create
                 // After commit, re-query the created wall and compare actual geometry
                 // against requested geometry. Claude can use this to self-correct
                 // if the creation produced unexpected results.
-                var verification = VerifyCreatedWall(doc, wall, startPoint, endPoint, height, level, wallType);
+                //
+                // NOTE: Revit places walls at level.Elevation (not Z=0), so we compare
+                // expected points at (X, Y, level.Elevation), not the Z=0 line we created.
+                var expectedStartWithLevel = new XYZ(startX, startY, level.Elevation);
+                var expectedEndWithLevel = new XYZ(endX, endY, level.Elevation);
+                var verification = VerifyCreatedWall(doc, wall, expectedStartWithLevel, expectedEndWithLevel, height, level, wallType);
 
                 // Return info about the created wall
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
