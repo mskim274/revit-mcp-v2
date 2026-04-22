@@ -95,7 +95,7 @@ Once published, this will become a single-line install:
 ```json
 {
   "mcpServers": {
-    "revit": { "command": "npx", "args": ["-y", "@mskim274/revit-mcp"] }
+    "revit": { "command": "npx", "args": ["-y", "@kimminsub/revit-mcp"] }
   }
 }
 ```

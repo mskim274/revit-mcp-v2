@@ -1,17 +1,48 @@
 {
-  "name": "revit-mcp-server",
+  "name": "@kimminsub/revit-mcp",
   "version": "0.1.0",
-  "description": "MCP Server for Autodesk Revit integration",
+  "description": "Model Context Protocol server for Autodesk Revit — 20 tools for read / query / create / modify / view operations, driven by Claude and other MCP clients.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "revit-mcp-server": "dist/index.js"
+    "revit-mcp": "dist/index.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
+    "prepublishOnly": "npm run build",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "revit",
+    "autodesk",
+    "bim",
+    "claude",
+    "anthropic",
+    "ai",
+    "llm"
+  ],
+  "author": "mskim274",
+  "license": "MIT",
+  "homepage": "https://github.com/mskim274/revit-mcp-v2#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mskim274/revit-mcp-v2.git",
+    "directory": "server"
+  },
+  "bugs": {
+    "url": "https://github.com/mskim274/revit-mcp-v2/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -27,6 +58,5 @@
   },
   "engines": {
     "node": ">=20.0.0"
-  },
-  "license": "MIT"
+  }
 }
