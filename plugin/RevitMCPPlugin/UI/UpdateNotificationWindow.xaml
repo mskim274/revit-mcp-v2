@@ -57,6 +57,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Header: new version available -->
@@ -138,14 +139,26 @@
                   x:Name="SnoozeCheckBox"
                   Content="하루 동안 알리지 않음"
                   Foreground="White"
-                  Margin="0,0,0,16"/>
+                  Margin="0,0,0,12"/>
+
+        <!-- Status text (progress during download, message on completion/error) -->
+        <TextBlock Grid.Row="4"
+                   x:Name="StatusText"
+                   Text=""
+                   Foreground="#888"
+                   FontSize="12"
+                   TextWrapping="Wrap"
+                   Margin="0,0,0,10"/>
 
         <!-- Action buttons -->
-        <StackPanel Grid.Row="4"
+        <StackPanel Grid.Row="5"
                     Orientation="Horizontal"
                     HorizontalAlignment="Right">
-            <Button Content="닫기" Click="OnCloseClick"/>
-            <Button Content="⬇  다운로드"
+            <Button x:Name="CloseButton"
+                    Content="닫기"
+                    Click="OnCloseClick"/>
+            <Button x:Name="DownloadButton"
+                    Content="⬇  다운로드 및 설치"
                     Style="{StaticResource PrimaryButton}"
                     Click="OnDownloadClick"/>
         </StackPanel>

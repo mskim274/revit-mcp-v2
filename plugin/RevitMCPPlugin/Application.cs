@@ -189,14 +189,27 @@ namespace RevitMCP.Plugin
 
         /// <summary>
         /// Resolve the currently running plugin version from assembly metadata.
-        /// Falls back to 0.0.0 if unreadable — update check will still run
-        /// and any valid GitHub release will be reported as newer.
+        ///
+        /// Prefers FileVersion (e.g., 0.2.0.0 injected by MinVer from the git tag)
+        /// over AssemblyVersion. Rationale: MinVer pins AssemblyVersion to
+        /// major.0.0.0 for binding-redirect compatibility, which would make
+        /// every 0.x release appear as 0.0.0 here. FileVersion retains the
+        /// actual release number and is what users expect to see.
+        ///
+        /// Falls back to 0.0.0 if unreadable — update check still runs and
+        /// any valid GitHub release will be reported as newer.
         /// </summary>
         private static Version GetCurrentPluginVersion()
         {
             try
             {
                 var asm = Assembly.GetExecutingAssembly();
+                var fvi = System.Diagnostics.FileVersionInfo.GetVersionInfo(asm.Location);
+                if (!string.IsNullOrWhiteSpace(fvi.FileVersion)
+                    && Version.TryParse(fvi.FileVersion, out var fileVer))
+                {
+                    return fileVer;
+                }
                 return asm.GetName().Version ?? new Version(0, 0, 0);
             }
             catch

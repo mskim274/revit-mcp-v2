@@ -6,6 +6,10 @@
     <Nullable>disable</Nullable>
     <RootNamespace>RevitMCP.CommandSet</RootNamespace>
     <AssemblyName>RevitMCP.CommandSet</AssemblyName>
+    <!-- Our tags are prefixed with 'v' (e.g., v0.2.0). MinVer's default
+         pattern excludes the prefix, which makes it silently ignore our
+         tags and fall back to 0.0.0-alpha.N. Explicit prefix fixes this. -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
   </PropertyGroup>
 
   <!-- MinVer: derive AssemblyVersion/FileVersion from the nearest git tag

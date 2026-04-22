@@ -9,6 +9,9 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <!-- WPF needed for the auto-update notification window (P0). -->
     <UseWPF>true</UseWPF>
+    <!-- Our release tags are 'v<semver>' (see release.yml). MinVer's
+         default pattern has no prefix and silently misses them. -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
   </PropertyGroup>
 
   <!-- MinVer: git tag → AssemblyVersion. See CommandSet.csproj for notes. -->

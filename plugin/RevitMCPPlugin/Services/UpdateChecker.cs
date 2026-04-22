@@ -22,6 +22,17 @@ namespace RevitMCP.Plugin.Services
     /// </summary>
     internal sealed class UpdateChecker
     {
+        // Target framework → Revit year mapping. Used to pick the right
+        // release asset (plugin zips are suffixed with "-Revit<year>").
+#if NET48
+        public const string RevitYear    = "2023";
+        public const string RevitYearTag = "Revit2023";
+#else
+        public const string RevitYear    = "2025";
+        public const string RevitYearTag = "Revit2025";
+#endif
+
+
         private readonly string _owner;
         private readonly string _repo;
         private readonly Version _currentVersion;
@@ -31,11 +42,29 @@ namespace RevitMCP.Plugin.Services
         /// <summary>The version discovered on GitHub (e.g., "0.3.0").</summary>
         public string LatestVersion { get; private set; }
 
+        /// <summary>Release tag (e.g., "v0.2.0") — preserves any leading 'v'.</summary>
+        public string LatestTag { get; private set; }
+
         /// <summary>HTML link to the release notes page.</summary>
         public string ReleaseNotesUrl { get; private set; }
 
-        /// <summary>Direct download URL for the preferred release asset.</summary>
-        public string DownloadUrl { get; private set; }
+        /// <summary>
+        /// Direct download URL for the plugin zip matching the current
+        /// Revit year (e.g., RevitMCPPlugin-0.2.0-Revit2025.zip).
+        /// </summary>
+        public string PluginZipUrl { get; private set; }
+
+        /// <summary>
+        /// Direct download URL for the standalone updater zip
+        /// (RevitMCPUpdater-0.2.0.zip). Required for auto-install flow.
+        /// </summary>
+        public string UpdaterZipUrl { get; private set; }
+
+        /// <summary>
+        /// Legacy alias for PluginZipUrl — preserved so earlier UI code
+        /// opening the "Download" link in a browser still works.
+        /// </summary>
+        public string DownloadUrl => PluginZipUrl;
 
         /// <summary>Human-readable release title (falls back to tag).</summary>
         public string ReleaseTitle { get; private set; }
@@ -94,20 +123,37 @@ namespace RevitMCP.Plugin.Services
                     return false;
 
                 LatestVersion = latest.ToString(3);
+                LatestTag = release.TagName;
                 ReleaseNotesUrl = release.HtmlUrl;
                 ReleaseTitle = !string.IsNullOrWhiteSpace(release.Name)
                     ? release.Name
                     : release.TagName;
 
-                // Prefer a .zip asset for auto-update delivery (Plan A).
-                // Falls back to any .msi asset for MSI delivery (future Plan B).
-                var preferred = release.Assets
-                    .FirstOrDefault(a => a.Name != null &&
+                // Separate the two asset types our release workflow publishes:
+                //   (1) Plugin zip matching the running Revit year
+                //       e.g., RevitMCPPlugin-0.2.0-Revit2025.zip
+                //   (2) Updater zip (no year suffix)
+                //       e.g., RevitMCPUpdater-0.2.0.zip
+                //
+                // If the plugin zip for our year isn't present we fall back
+                // to any plugin zip, then to the release HTML URL.
+                var pluginAsset =
+                    FindAsset(release.Assets, a =>
+                        a.Name != null &&
+                        a.Name.IndexOf(RevitYearTag, StringComparison.OrdinalIgnoreCase) >= 0 &&
                         a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                    ?? release.Assets.FirstOrDefault(a => a.Name != null &&
-                        a.Name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase));
+                    ?? FindAsset(release.Assets, a =>
+                        a.Name != null &&
+                        a.Name.StartsWith("RevitMCPPlugin-", StringComparison.OrdinalIgnoreCase) &&
+                        a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
 
-                DownloadUrl = preferred?.DownloadUrl ?? release.HtmlUrl;
+                var updaterAsset = FindAsset(release.Assets, a =>
+                    a.Name != null &&
+                    a.Name.StartsWith("RevitMCPUpdater-", StringComparison.OrdinalIgnoreCase) &&
+                    a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
+
+                PluginZipUrl  = pluginAsset?.DownloadUrl ?? release.HtmlUrl;
+                UpdaterZipUrl = updaterAsset?.DownloadUrl;
                 return true;
             }
             catch (Exception ex)
@@ -167,6 +213,20 @@ namespace RevitMCP.Plugin.Services
             var json = JsonSerializer.Serialize(cache,
                 new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(_cachePath, json);
+        }
+
+        /// <summary>
+        /// Linear-scan helper for picking a GitHub release asset that
+        /// satisfies a predicate. Kept tiny so it inlines cleanly.
+        /// </summary>
+        private static GitHubAsset FindAsset(
+            System.Collections.Generic.List<GitHubAsset> assets,
+            Func<GitHubAsset, bool> predicate)
+        {
+            if (assets == null) return null;
+            foreach (var a in assets)
+                if (a != null && predicate(a)) return a;
+            return null;
         }
 
         /// <summary>
