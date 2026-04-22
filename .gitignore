@@ -26,6 +26,7 @@ Thumbs.db
 
 # Build artifacts
 *.nupkg
+updater/publish/
 
 # Claude Code session state (local-only)
 .claude/
