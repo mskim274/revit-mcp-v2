@@ -132,13 +132,13 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
-        run: npm ci
-        working-directory: server
+      # npm workspace lock + node_modules live at the repo root, not in
+      # server/. `npm ci --workspaces` hydrates all workspace packages.
+      - name: Install dependencies (root, workspace-aware)
+        run: npm ci --workspaces --include-workspace-root
 
-      - name: Build
-        run: npm run build
-        working-directory: server
+      - name: Build server workspace
+        run: npm run build --workspace=server
 
       - name: Sync package version with git tag
         shell: bash
@@ -152,14 +152,12 @@ jobs:
           fi
           if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             echo "Setting npm version to $VERSION"
-            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            npm version "$VERSION" --no-git-tag-version --allow-same-version --workspace=server
           else
             echo "No semver tag detected (GITHUB_REF_NAME=$GITHUB_REF_NAME); keeping package.json version."
           fi
-        working-directory: server
 
       - name: Publish to npm
-        run: npm publish --access public
-        working-directory: server
+        run: npm publish --access public --workspace=server
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
