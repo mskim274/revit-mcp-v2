@@ -1,12 +1,16 @@
-// Direct WebSocket test — bypasses MCP TS server, talks to plugin directly
+// Direct WebSocket test — bypasses MCP TS server, talks to plugin directly.
 // Usage: node scripts/test-ws.js <command> [json-params]
+//
+// Picks the port from MCP_PORT (or REVIT_MCP_PORT for legacy compat).
+// Default 8181 (Revit). For AutoCAD: MCP_PORT=8182 node scripts/test-ws.js ping
 import WebSocket from "ws";
 
 const command = process.argv[2] || "get_project_info";
 const params = process.argv[3] ? JSON.parse(process.argv[3]) : {};
 const id = `test-${Date.now()}`;
 
-const ws = new WebSocket("ws://127.0.0.1:8181/");
+const port = process.env.MCP_PORT || process.env.REVIT_MCP_PORT || process.env.AUTOCAD_MCP_PORT || "8181";
+const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
 
 const timeout = setTimeout(() => {
   console.error("[TIMEOUT] no response in 30s");
