@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>AutoCADMCPPlugin</AssemblyName>
+    <RootNamespace>AutoCADMCP.Plugin</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <!-- New GUID, fresh, no collision with Revit MCP (DFFD689E-...).
+         Don't reuse — every Autodesk addin needs a unique ID. -->
+    <PluginGuid>9D1A7F0D-64F2-46A9-BF8A-E37D608EB229</PluginGuid>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\commandset\CommandSet.csproj" />
+  </ItemGroup>
+
+  <!-- AutoCAD .NET API: same logic as CommandSet.csproj. -->
+  <PropertyGroup>
+    <AutoCAD2025Path Condition="'$(AUTOCAD_2025_PATH)' != ''">$(AUTOCAD_2025_PATH)</AutoCAD2025Path>
+    <AutoCAD2025Path Condition="'$(AutoCAD2025Path)' == ''">C:\Program Files\Autodesk\AutoCAD 2025</AutoCAD2025Path>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(AutoCAD2025Path)\accoremgd.dll')">
+    <Reference Include="accoremgd">
+      <HintPath>$(AutoCAD2025Path)\accoremgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="acdbmgd">
+      <HintPath>$(AutoCAD2025Path)\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="acmgd">
+      <HintPath>$(AutoCAD2025Path)\acmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

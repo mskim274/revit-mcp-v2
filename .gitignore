@@ -2,6 +2,7 @@
 node_modules/
 server/dist/
 packages/*/dist/
+autocad/server/dist/
 *.tgz
 
 # .NET

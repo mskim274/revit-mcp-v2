@@ -5,14 +5,17 @@
   "description": "AI-Powered Revit Modeling via Model Context Protocol",
   "workspaces": [
     "packages/*",
-    "server"
+    "server",
+    "autocad/server"
   ],
   "scripts": {
     "build:core": "npm run build --workspace=@kimminsub/mcp-cad-core",
     "build:server": "npm run build --workspace=server",
-    "build": "npm run build:core && npm run build:server",
+    "build:autocad": "npm run build --workspace=@kimminsub/autocad-mcp",
+    "build": "npm run build:core && npm run build:server && npm run build:autocad",
     "dev:server": "npm run dev --workspace=server",
-    "start:server": "npm run start --workspace=server"
+    "start:server": "npm run start --workspace=server",
+    "start:autocad": "npm run start --workspace=@kimminsub/autocad-mcp"
   },
   "author": "kimminsub <and.ms.kim@gmail.com>",
   "license": "MIT"

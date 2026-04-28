@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>AutoCADMCP.CommandSet</AssemblyName>
+    <RootNamespace>AutoCADMCP.CommandSet</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <!-- AutoCAD .NET API references. Local dev uses installed AutoCAD DLLs.
+       CI fallback to Nice3point.AutoCAD packages will be added in Phase 5. -->
+  <PropertyGroup>
+    <AutoCAD2025Path Condition="'$(AUTOCAD_2025_PATH)' != ''">$(AUTOCAD_2025_PATH)</AutoCAD2025Path>
+    <AutoCAD2025Path Condition="'$(AutoCAD2025Path)' == ''">C:\Program Files\Autodesk\AutoCAD 2025</AutoCAD2025Path>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(AutoCAD2025Path)\accoremgd.dll')">
+    <Reference Include="accoremgd">
+      <HintPath>$(AutoCAD2025Path)\accoremgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="acdbmgd">
+      <HintPath>$(AutoCAD2025Path)\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="acmgd">
+      <HintPath>$(AutoCAD2025Path)\acmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
