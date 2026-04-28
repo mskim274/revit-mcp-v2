@@ -44,6 +44,44 @@ Use before cad_create_line / cad_create_* to verify the target layer exists.`,
   );
 
   server.registerTool(
+    "cad_extract_table",
+    {
+      title: "Extract AutoCAD Table to Structured Data",
+      description: `Read AutoCAD Table entities (the dedicated 'Table' class — created via INSERT TABLE or imported as OLE Excel → Convert to AutoCAD Table) into header + row-of-dict shape suitable for JSON / xlsx export.
+
+For Korean structural drawings (보 일람표 / 기둥 일람표): use this when the schedule was drawn with INSERT TABLE. If the schedule is drawn with Line+Text (a hand-built grid), this returns 'tables_found: 0' with a hint — use the future extract_grid_schedule for that case.
+
+Returns one entry per Table entity with:
+- handle: hex entity handle (use this with cad_query_entities to cross-reference)
+- headers: array of column names from header_row
+- data: array of {column_name: cell_value} dicts, one per data row
+- rows / columns: total counts
+- position / layer: where the table sits
+
+To extract a specific table, pass its handle (from cad_query_entities entity_type='Table'). Otherwise all tables in model space are returned.`,
+      inputSchema: {
+        handle: z.string().optional()
+          .describe("Specific table entity handle (hex string, e.g. '2A4'). Omit for all tables in model space."),
+        header_row: z.number().int().min(0).optional()
+          .describe("Row index (0-based) containing column headers. Default 0."),
+        limit: z.number().int().min(1).max(20).optional()
+          .describe("Max number of tables to return. Default 5."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => sendAndFormat(wsClient, "extract_table", {
+      handle: params.handle,
+      header_row: params.header_row,
+      limit: params.limit,
+    })
+  );
+
+  server.registerTool(
     "cad_query_entities",
     {
       title: "Search AutoCAD Entities",
