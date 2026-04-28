@@ -1,197 +1,316 @@
-# Setup Guide — Continuing Work on a New Machine
+# Setup Guide — 새 컴퓨터에서 작업 이어가기
 
-You want to pick up revit-mcp-v2 development on another computer. Everything
-that matters is already in git, so the flow is: install prerequisites →
-clone → build → configure Claude Desktop.
+회사/집 두 대 컴퓨터에서 같은 프로젝트를 작업하기 위한 세팅 가이드입니다.
+이 문서는 회사 컴퓨터에서 실제로 적용한 절차를 그대로 따라갈 수 있도록
+순서대로 정리되어 있습니다.
+
+> **결론 먼저**: 코드는 git에 다 있고, **머신별로 따로 세팅해야 하는 항목들**이
+> 핵심입니다. 환경변수, MCP 클라이언트 설정, GitHub 인증, 빌드 산출물 등.
 
 ---
 
-## 1. Prerequisites
+## 0. 사전 설치 (Prerequisites)
 
-Install these on the new machine (skip anything already there):
+새 머신에서 처음 한 번만:
 
-| Tool | Why | Install |
+| 도구 | 용도 | 설치 |
 |---|---|---|
-| **Autodesk Revit 2025** | The host application | License from Autodesk |
-| **.NET 8 SDK** | Build C# plugin + updater | https://dotnet.microsoft.com/download |
-| **Node.js 18+** | Build TypeScript MCP server | https://nodejs.org |
-| **Git** | Clone the repo | https://git-scm.com |
-| **Claude Desktop** | MCP client that talks to the server | https://claude.ai/download |
-| **VS Code / Cursor / Claude Code** | Editor (any is fine) | Optional |
+| **Autodesk Revit 2025** | 호스트 애플리케이션 | Autodesk 라이선스 |
+| **AutoCAD 2024+** (선택) | autocad-mcp 사용 시 | Autodesk 라이선스 |
+| **.NET 8 SDK** | C# 플러그인 + 업데이터 빌드 | https://dotnet.microsoft.com/download |
+| **Node.js 18+** | TypeScript MCP 서버 빌드 | https://nodejs.org |
+| **Git** | 저장소 클론 | https://git-scm.com |
+| **Claude Desktop** | MCP 클라이언트 | https://claude.ai/download |
+| **winget** | Windows 패키지 매니저 (Win11 기본 포함) | — |
 
-Windows 10 / 11 only — the plugin uses WPF.
+Windows 10/11 전용 (플러그인이 WPF 사용).
 
 ---
 
-## 2. Clone + build
+## 1. 저장소 클론
 
 ```powershell
-# Clone the repo to any folder you like
+# 원하는 폴더로 이동 후
 git clone https://github.com/mskim274/revit-mcp-v2.git
 cd revit-mcp-v2
+```
 
-# Build the TypeScript server
-cd server
-npm install
-npm run build
-cd ..
+---
 
-# Build + deploy the Revit plugin (Revit must be CLOSED)
-$env:REVIT_2025_PATH = "C:\Program Files\Autodesk\Revit 2025"
+## 2. Git 글로벌 설정 (한 번만)
+
+```powershell
+git config --global user.name "mskim274"
+git config --global user.email "and.ms.kim@gmail.com"
+git config --global core.autocrlf true            # Windows 개행 정규화
+git config --global credential.helper manager     # 자격증명 캐싱
+git config --global init.defaultBranch main
+```
+
+확인:
+```powershell
+git config --global --list | findstr /R "^user ^core.autocrlf ^credential ^init.default"
+```
+
+---
+
+## 3. GitHub CLI 설치 + 인증
+
+```powershell
+# 설치
+winget install --id GitHub.cli --silent --accept-package-agreements --accept-source-agreements
+
+# 새 터미널 열기 (PATH 갱신용)
+gh auth login
+# → GitHub.com → HTTPS → "Login with a web browser" 선택
+# 표시되는 8자리 코드를 브라우저에서 입력
+```
+
+확인:
+```powershell
+gh auth status
+# ✓ Logged in to github.com account mskim274
+```
+
+---
+
+## 4. 환경변수 설정 (User 레벨, 영구)
+
+PowerShell에서 한 번 실행하면 영구 적용 (재부팅 불필요, 새 터미널만 열면 됨):
+
+```powershell
+[Environment]::SetEnvironmentVariable("REVIT_2025_PATH", "C:\Program Files\Autodesk\Revit 2025", "User")
+[Environment]::SetEnvironmentVariable("REVIT_2023_PATH", "C:\Program Files\Autodesk\Revit 2023", "User")
+```
+
+**Revit 설치 경로가 다르면** 위 경로만 본인 환경에 맞게 변경.
+환경변수가 비어있으면 csproj가 Nice3point NuGet 패키지로 자동 fallback —
+CI에서는 이 fallback을 사용하지만 **로컬에서는 정확한 Revit DLL 매칭을 위해
+설정 권장**.
+
+확인 (새 터미널에서):
+```powershell
+echo $env:REVIT_2025_PATH
+```
+
+---
+
+## 5. Node 의존성 설치 + TypeScript 빌드
+
+저장소 루트가 npm workspace 구조라서 루트에서 한 번에:
+
+```powershell
+cd <repo-root>
+npm install                # workspace 전체 (server, autocad/server, packages/*)
+npm run build              # 모든 TS 워크스페이스 빌드
+```
+
+빌드 결과 확인:
+```powershell
+dir server\dist\index.js
+dir autocad\server\dist\index.js
+```
+
+---
+
+## 6. C# 플러그인 빌드 + Revit Addins 배포
+
+> ⚠️ **Revit이 켜져 있으면 DLL 잠금으로 실패합니다. 반드시 Revit 종료 상태에서.**
+
+```powershell
 .\scripts\build-and-deploy.ps1 -RevitVersion 2025
 ```
 
-After the deploy script finishes, the plugin DLLs are at
-`%APPDATA%\Autodesk\Revit\Addins\2025\`.
+이 스크립트가 하는 일:
+- TypeScript 서버 빌드
+- NuGet 패키지 복원
+- C# 솔루션 빌드 (Release, net8.0-windows)
+- DLL을 `%APPDATA%\Autodesk\Revit\Addins\2025\`에 복사
+
+배포 결과 확인:
+```powershell
+dir "$env:APPDATA\Autodesk\Revit\Addins\2025" | findstr /I "RevitMCP revit-mcp"
+# RevitMCPPlugin.dll
+# RevitMCP.CommandSet.dll
+# revit-mcp.addin
+```
 
 ---
 
-## 3. Configure Claude Desktop
+## 7. Claude Desktop MCP 설정
 
-Open `%APPDATA%\Claude\claude_desktop_config.json` and add the `revit`
-server block. Merge it with any other MCP servers you already have:
+`%APPDATA%\Claude\claude_desktop_config.json` 편집. 기존 다른 MCP 서버가
+있으면 **mcpServers 객체 안에 추가**하면 됩니다.
 
 ```json
 {
   "mcpServers": {
-    "revit": {
+    "revit-mcp-v2": {
       "command": "node",
-      "args": [
-        "C:\\Users\\YOU\\revit-mcp-v2\\server\\dist\\index.js"
-      ],
-      "env": {
-        "REVIT_MCP_PORT": "8181"
-      }
+      "args": ["C:\\Users\\<사용자명>\\<경로>\\revit-mcp-v2\\server\\dist\\index.js"]
+    },
+    "cad-mcp-v2": {
+      "command": "node",
+      "args": ["C:\\Users\\<사용자명>\\<경로>\\revit-mcp-v2\\autocad\\server\\dist\\index.js"]
     }
   }
 }
 ```
 
-Replace the path with wherever you cloned the repo. Use double
-backslashes in JSON.
+> **JSON에서는 백슬래시를 두 번** (`\\`) 써야 합니다.
 
-**Alternative (once Phase P2 ships)**: install via npm and drop the
-absolute path entirely:
-
-```json
-{
-  "mcpServers": {
-    "revit": { "command": "npx", "args": ["-y", "@kimminsub/revit-mcp"] }
-  }
-}
+기존 설정을 백업하고 편집하는 것이 안전:
+```powershell
+$cfg = "$env:APPDATA\Claude\claude_desktop_config.json"
+Copy-Item $cfg "$cfg.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+notepad $cfg
 ```
 
-Restart Claude Desktop so it picks up the new config.
+설정 후 **Claude Desktop 완전 종료 → 재시작** (트레이 아이콘에서 Quit).
 
 ---
 
-## 4. Verify
+## 8. 검증 (Verification)
 
-1. Start Revit 2025 and open any project.
-2. In Claude Desktop, ask: *"Call revit_ping."*
-3. You should see the project name, Revit build number, and element
-   count come back.
+### Revit 플러그인 동작 확인
+1. Revit 2025 시작 → 아무 프로젝트 열기 (또는 New Project)
+2. PowerShell에서:
+   ```powershell
+   curl http://127.0.0.1:8181/
+   # {"status":"ok","server":"revit-mcp-plugin"}
+   ```
 
-If the ping fails:
+### Claude Desktop MCP 연결 확인
+1. Claude Desktop 재시작
+2. 새 대화에서: "Call revit_ping."
+3. 프로젝트 이름 + Revit 빌드 + 요소 수 반환되면 성공
 
-- Make sure Revit has a project open — the WebSocket starts on
-  `DocumentOpened` / `DocumentCreated`, not at plugin-load time.
-- `curl http://127.0.0.1:8181/` from PowerShell should return
-  `{"status":"ok","server":"revit-mcp-plugin"}`.
-- Check `scripts/test-ws.js` for direct WebSocket probes that bypass
-  Claude's MCP client entirely.
-
----
-
-## 5. What transfers vs. what doesn't
-
-### ✅ Fully portable (in git)
-
-- Source code, build scripts, CI workflows.
-- `CLAUDE.md` — all the agent-level conventions. When you open Claude
-  Code in this folder on a new machine, it reads `CLAUDE.md`
-  automatically and picks up project context.
-- Release zips on GitHub — the same v0.3.0 you're running here is
-  available for download on the new machine.
-
-### ⚠️ Needs reconfiguration per machine
-
-- `claude_desktop_config.json` — absolute paths differ per machine.
-- `REVIT_2025_PATH` environment variable — only needed for local
-  C# builds; CI uses the Nice3point NuGet fallback.
-- Revit license — must be activated on the new machine.
-
-### ❌ Does NOT transfer (by design)
-
-- Claude Code / Claude Desktop **conversation history** — sessions
-  are local. To continue a long-running thread, either (a) keep
-  working on the original machine, or (b) summarize the relevant
-  context into a prompt you paste into the new session. `CLAUDE.md`
-  intentionally captures the durable project knowledge so chat
-  history loss doesn't block progress.
-- Per-user `.claude/settings.local.json` — gitignored on purpose.
-- Any untracked scratch files (`scratch/`, `*.pbix`, etc.).
+### 트러블슈팅
+- **WebSocket 응답 없음**: Revit에 프로젝트가 열려 있는지 확인 (플러그인은
+  `DocumentOpened`/`DocumentCreated` 이벤트에서 시작)
+- **MCP 서버 못 찾음**: `claude_desktop_config.json`의 경로에 백슬래시
+  두 번 들어갔는지 확인
+- **DLL 로드 실패**: Revit → File → Options → Add-ins 탭에서 "RevitMCPPlugin"
+  활성 여부 확인
 
 ---
 
-## 6. Typical "two-machine" workflows
+## 9. 일일 작업 흐름 (Daily Workflow)
 
-### a) Continue on a second laptop tonight
+### 작업 시작
+```powershell
+git pull
+# package.json 변경 있었으면:
+npm install
+# C# 변경 있었으면 (Revit 종료 후):
+.\scripts\build-and-deploy.ps1 -RevitVersion 2025
+```
+
+### 작업 종료
+```powershell
+git status
+git add <files>
+git commit -m "..."
+git push
+```
+
+### 머신 전환 시 작업 중인 변경사항 이동
+`git stash`는 머신 간 이동이 안 됩니다. 대신:
+```powershell
+# 떠나는 머신에서
+git checkout -b wip/<설명>
+git add -A && git commit -m "WIP: <설명>"
+git push -u origin wip/<설명>
+
+# 도착한 머신에서
+git fetch && git checkout wip/<설명>
+git reset --soft HEAD~1   # 커밋 풀기 (변경사항은 유지)
+```
+
+> ⚠️ **두 머신에서 동시에 같은 브랜치에 푸시하면 충돌**합니다.
+> 항상 한쪽 작업 → push → 다른 쪽 pull 순서를 지키세요.
+
+---
+
+## 10. 머신별 / 공유 항목 정리
+
+### ✅ Git 동기화 (자동)
+- 소스 코드, 빌드 스크립트, CI 워크플로우
+- `CLAUDE.md` — 에이전트 컨벤션 (Claude Code가 자동 로드)
+- GitHub Releases zip — 어느 머신에서든 다운로드 가능
+
+### ⚠️ 머신별 따로 세팅 (이 가이드 대상)
+| 항목 | 위치 |
+|---|---|
+| Git 글로벌 설정 | `~/.gitconfig` |
+| GitHub 인증 | Windows 자격증명 관리자 (keyring) |
+| `REVIT_*_PATH` 환경변수 | 시스템 User 환경변수 |
+| Claude Desktop MCP 설정 | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Revit Addins 폴더 DLL | `%APPDATA%\Autodesk\Revit\Addins\<year>\` |
+| node_modules / bin / obj | 각 머신에서 빌드 |
+| Revit 라이선스 | 각 머신에서 활성화 |
+
+### ❌ 의도적으로 동기화 안 됨
+- Claude Code / Claude Desktop **대화 기록** — 세션은 로컬
+- `.claude/settings.local.json` — gitignored
+- `scratch/`, `작업자료/`, `*.pbix` 등 로컬 작업 파일
+- Claude Code 메모리 (`~/.claude/projects/.../memory/`)
+
+> **대화 컨텍스트 인계 팁**: 작업 종료 시 커밋 메시지나 `CHANGELOG.md`에
+> 어디서 멈췄는지 한 줄 남겨두면, 다른 머신에서 Claude Code 새 세션이
+> 그 내용을 읽고 자연스럽게 이어갑니다. AI 세션 동기화에 의존하지 마세요.
+
+---
+
+## 11. 주요 경로 레퍼런스
+
+```
+저장소:                          C:\Users\<user>\<path>\revit-mcp-v2
+플러그인 DLL 배포 위치:          %APPDATA%\Autodesk\Revit\Addins\2025
+TS 서버 진입점 (Claude 사용):    server\dist\index.js
+AutoCAD TS 서버 진입점:          autocad\server\dist\index.js
+플러그인 업데이트 캐시:          %LOCALAPPDATA%\RevitMCP\update-cache.json
+다운로드된 플러그인 zip:         %LOCALAPPDATA%\RevitMCP\Updates\v<ver>\
+응답 오버플로우 spill:           %TEMP%\revit-mcp-spill\
+Claude Desktop 설정:             %APPDATA%\Claude\claude_desktop_config.json
+Revit 저널 (디버깅):             %LOCALAPPDATA%\Autodesk\Revit\Autodesk Revit 2025\Journals
+```
+
+---
+
+## 12. 한 번에 실행하는 부트스트랩 (참고)
+
+처음 세팅할 때 7~8단계까지 한 번에 실행하고 싶으면 (Revit 종료 상태에서):
 
 ```powershell
-# On the original machine — push any uncommitted work first
-git push
+# 1. Clone & enter
+git clone https://github.com/mskim274/revit-mcp-v2.git
+cd revit-mcp-v2
 
-# On the second laptop
-cd path\to\revit-mcp-v2
-git pull
-npm --prefix server run build
-# (C# plugin only needs a rebuild if you changed C# since last deploy)
+# 2. Git config
+git config --global user.name "mskim274"
+git config --global user.email "and.ms.kim@gmail.com"
+git config --global core.autocrlf true
+git config --global credential.helper manager
+git config --global init.defaultBranch main
+
+# 3. gh CLI
+winget install --id GitHub.cli --silent --accept-package-agreements --accept-source-agreements
+# (새 터미널 열고 gh auth login)
+
+# 4. Env vars
+[Environment]::SetEnvironmentVariable("REVIT_2025_PATH", "C:\Program Files\Autodesk\Revit 2025", "User")
+[Environment]::SetEnvironmentVariable("REVIT_2023_PATH", "C:\Program Files\Autodesk\Revit 2023", "User")
+
+# 5. Node deps + TS build
+npm install
+npm run build
+
+# 6. C# plugin build + deploy
+.\scripts\build-and-deploy.ps1 -RevitVersion 2025
+
+# 7. Claude Desktop config — 수동 편집 필요 (위 7번 참고)
+notepad $env:APPDATA\Claude\claude_desktop_config.json
 ```
 
-If you also want Claude Code's session history to mirror over,
-just... don't expect that to work. Instead, end each session on the
-first machine with a clean commit + a note in `CLAUDE.md` or
-`CHANGELOG.md` describing where you stopped. Pick up on the new
-machine by reading those. This is the sanest way to hand off work
-between machines regardless of the AI tooling.
-
-### b) You bought a new dev machine and migrating
-
-Do the full bootstrap once (above). Then:
-
-1. Install whatever editor you prefer.
-2. `git clone` the repo.
-3. Build + deploy.
-4. Point Claude Desktop at the new path.
-5. The old machine is now redundant — delete the local checkout when
-   you're sure everything works on the new one.
-
-### c) You're testing end-to-end auto-update on a new machine
-
-Great test case. The new machine is a true "first-time user":
-
-1. Install prereqs.
-2. Download `RevitMCPPlugin-<latest>-Revit2025.zip` from
-   [Releases](https://github.com/mskim274/revit-mcp-v2/releases/latest).
-3. Extract the 4 files to `%APPDATA%\Autodesk\Revit\Addins\2025\`.
-4. Start Revit + any project. Plugin loads, checks GitHub, sees
-   itself as latest, no dialog.
-5. (Optional) Cut a v0.X.Y bump on the main machine. The new
-   machine's Revit startup will detect it and show the auto-install
-   dialog on next launch.
-
----
-
-## 7. Quick reference — paths
-
-```
-Repository:                     C:\Users\YOU\path\to\revit-mcp-v2
-Plugin DLLs (deployed):         %APPDATA%\Autodesk\Revit\Addins\2025
-TS server entry (Claude uses):  server\dist\index.js
-Plugin update cache:            %LOCALAPPDATA%\RevitMCP\update-cache.json
-Downloaded plugin zips:         %LOCALAPPDATA%\RevitMCP\Updates\v<ver>\
-Response overflow spill:        %TEMP%\revit-mcp-spill\
-Claude Desktop config:          %APPDATA%\Claude\claude_desktop_config.json
-Revit journal (debugging):      %LOCALAPPDATA%\Autodesk\Revit\Autodesk Revit 2025\Journals
-```
+이후 Claude Desktop / Revit 재시작하면 끝.
