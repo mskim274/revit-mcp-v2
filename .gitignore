@@ -41,3 +41,19 @@ scratch/
 /beam_*.txt
 /expr_*.txt
 /powerbi/
+
+# Daily work files (organized into 작업자료/YYYY-MM-DD/ — local only)
+작업자료/
+
+# Office app lock files (auto-deleted when app closes)
+.~lock.*#
+~$*
+
+# Spreadsheets / data files at repo root (local working data)
+*.xlsx
+*.xls
+*.xlsm
+
+# Side-by-side clones / legacy copies (have their own .git)
+gstack/
+revit-mcp-v2/
