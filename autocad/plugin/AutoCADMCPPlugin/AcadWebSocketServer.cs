@@ -229,21 +229,75 @@ namespace AutoCADMCP.Plugin
                         recoverable: true);
                 }
 
-                await acadDocs.ExecuteInCommandContextAsync(async (object _) =>
+                // Pre-capture PICKFIRST set BEFORE entering
+                // ExecuteInCommandContextAsync. Inside that context AutoCAD
+                // treats us like a running command and Editor.SelectImplied()
+                // returns empty. Capturing here on the worker thread requires
+                // a DocumentLock to safely touch the editor.
+                Autodesk.AutoCAD.DatabaseServices.ObjectId[] preSelection
+                    = Array.Empty<Autodesk.AutoCAD.DatabaseServices.ObjectId>();
+                try
                 {
-                    using var tr = activeDoc.Database.TransactionManager.StartTransaction();
-                    try
+                    using (var dlock = activeDoc.LockDocument(
+                        Autodesk.AutoCAD.ApplicationServices.DocumentLockMode.Read,
+                        "MCP-CapturePickFirst", "MCP-CapturePickFirst", true))
                     {
-                        result = await command.ExecuteAsync(
-                            activeDoc.Database, tr, parameters, CancellationToken.None);
-                        tr.Commit();
+                        var sr = activeDoc.Editor.SelectImplied();
+                        if (sr.Status == Autodesk.AutoCAD.EditorInput.PromptStatus.OK
+                            && sr.Value != null)
+                        {
+                            preSelection = sr.Value.GetObjectIds();
+                        }
                     }
-                    catch (Exception ex)
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[AutoCADMCP] PICKFIRST capture failed: {ex.Message}");
+                }
+                AutoCADMCP.CommandSet.Interfaces.SelectionContext.Current = preSelection;
+
+                try
+                {
+                    await acadDocs.ExecuteInCommandContextAsync(async (object _) =>
                     {
-                        captured = ex;
-                        try { tr.Abort(); } catch { /* ignore */ }
+                        using var tr = activeDoc.Database.TransactionManager.StartTransaction();
+                        try
+                        {
+                            result = await command.ExecuteAsync(
+                                activeDoc.Database, tr, parameters, CancellationToken.None);
+                            tr.Commit();
+                        }
+                        catch (Exception ex)
+                        {
+                            captured = ex;
+                            try { tr.Abort(); } catch { /* ignore */ }
+                        }
+                    }, null);
+                }
+                finally
+                {
+                    // Restore the user's PICKFIRST set so they can issue more
+                    // commands against the same selection without re-picking.
+                    // ExecuteInCommandContextAsync clears it; we put it back.
+                    if (preSelection.Length > 0)
+                    {
+                        try
+                        {
+                            using (var dlock2 = activeDoc.LockDocument(
+                                Autodesk.AutoCAD.ApplicationServices.DocumentLockMode.Write,
+                                "MCP-RestorePickFirst", "MCP-RestorePickFirst", true))
+                            {
+                                activeDoc.Editor.SetImpliedSelection(preSelection);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[AutoCADMCP] PICKFIRST restore failed: {ex.Message}");
+                        }
                     }
-                }, null);
+                    AutoCADMCP.CommandSet.Interfaces.SelectionContext.Current
+                        = Array.Empty<Autodesk.AutoCAD.DatabaseServices.ObjectId>();
+                }
 
                 if (captured != null)
                 {

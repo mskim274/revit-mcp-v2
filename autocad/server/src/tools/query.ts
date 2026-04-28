@@ -111,4 +111,122 @@ For large drawings (10K+ entities), always start with summary_only=true and a sp
     },
     async (params) => sendAndFormat(wsClient, "query_entities", params)
   );
+
+  server.registerTool(
+    "cad_get_selected_entities",
+    {
+      title: "Get Currently Selected AutoCAD Entities",
+      description: `Returns the user's PICKFIRST selection — the entities they had selected in AutoCAD before invoking this tool. Each entity reports handle, type, layer, color, linetype, plus type-specific extras (text/position for DBText/MText, start/end/length for Line, center/radius for Circle, vertex_count for Polyline, block_name/position/rotation/scale for BlockReference).
+
+Use this when the user says things like "현재 선택한 ...", "선택한 요소들", "now look at what I picked" — anything implying they've selected entities in the AutoCAD UI.
+
+Returns count=0 with a hint if no PICKFIRST selection exists. Set include_geometry=true to add bounding-box extents (heavier — only when needed). Default limit=500, max=1000.`,
+      inputSchema: {
+        include_geometry: z.boolean().optional()
+          .describe("Add bounding-box extents to each entity. Default false (lighter)."),
+        limit: z.number().int().min(1).max(1000).optional()
+          .describe("Max entities to return. Default 500. Total selection count is always returned in 'count' even when truncated."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false, // selection state can change between calls
+        openWorldHint: false,
+      },
+    },
+    async (params) => sendAndFormat(wsClient, "get_selected_entities", {
+      include_geometry: params.include_geometry,
+      limit: params.limit,
+    })
+  );
+
+  server.registerTool(
+    "cad_get_selection_texts",
+    {
+      title: "Get Text from Current Selection",
+      description: `Lighter-weight variant of cad_get_selected_entities — returns only DBText and MText from the user's PICKFIRST selection. Each entry has text content (plain), layer, height, rotation, and insertion-point [x,y,z]. Non-text entities are counted in skipped_non_text but not returned.
+
+Use when you only need text content for downstream parsing (e.g. extracting beam symbols, dimensions from a schedule selection). For a full structured grid extraction, prefer cad_parse_grid_schedule which clusters lines + texts into a table.`,
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async () => sendAndFormat(wsClient, "get_selection_texts")
+  );
+
+  server.registerTool(
+    "cad_get_selection_dimensions",
+    {
+      title: "Get Dimension Entities from Current Selection",
+      description: `Returns Dimension entities (RotatedDimension / AlignedDimension / Radial / Diametric / Arc / Angular / Ordinate) from the user's PICKFIRST selection — including the actual numeric measurement value.
+
+Use this when a Korean structural schedule's section sizes (B×D) or column dimensions are drawn as DIM entities rather than text labels. Each dimension reports:
+- measurement (numeric value, the actual distance/angle measured)
+- dim_text (override text, empty if AutoCAD just shows the measurement)
+- formatted_text (string AutoCAD would render, with units/tolerances applied)
+- text_position [x,y,z]
+- For RotatedDimension/AlignedDimension: xline1, xline2 (extension line origins), dim_line_point, span_length, orientation ("horizontal" / "vertical" / "angled")
+- For radial/diametric: center, chord_point, leader_length
+
+Pair horizontal+vertical dimensions sharing a region to recover B×D for each beam section. Spatial association: a beam section drawing's B is the horizontal dimension whose extension lines straddle it; D is the vertical one.`,
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async () => sendAndFormat(wsClient, "get_selection_dimensions")
+  );
+
+  server.registerTool(
+    "cad_parse_grid_schedule",
+    {
+      title: "Parse Hand-drawn Grid Schedule into Table",
+      description: `Reconstructs a hand-drawn AutoCAD schedule (Line + DBText/MText forming a grid — common in Korean structural drawings: 보 일람표 / PC보 일람표 / 기둥 일람표) into headers + row dicts.
+
+Algorithm: clusters horizontal-line Y-coords and vertical-line X-coords into row/column bands using auto-detected tolerance (≈ median text height ÷ 2). Each text's insertion point is binary-searched into a cell. Header row identified by Korean structural token whitelist (부재기호, 단면, 상부근, …); falls back to top row.
+
+**Default scope='selection'**: requires the user to have selected the schedule region in AutoCAD first. For 31K+ entity drawings, never use scope='all' without a layer filter. Use scope='layer' with a specific schedule layer name when no selection is available.
+
+Returns:
+- headers: list of column names (header row, normalized)
+- rows: array of {header_name: cell_value} dicts
+- preview_markdown: first 8 rows as markdown table (LLM-friendly summary)
+- header_row_index, header_confidence ("high" if ≥2 known tokens matched, else "low")
+- diagnostics: entity counts, grid dimensions, tolerance used, placed/unplaced text counts
+
+Tune tolerance manually if rows merge unexpectedly (try 0.5 to 5.0 in drawing units).`,
+      inputSchema: {
+        scope: z.enum(["selection", "layer", "all"]).optional()
+          .describe("Where to look for the schedule. Default 'selection' (requires PICKFIRST set). 'all' iterates the whole model space — slow on large drawings."),
+        layer: z.string().optional()
+          .describe("Layer name when scope='layer'. Case-insensitive exact match."),
+        tolerance: z.number().optional()
+          .describe("Manual cluster tolerance in drawing units. Default: auto (median text height ÷ 2). Increase if rows split incorrectly, decrease if rows merge."),
+        header_tokens: z.array(z.string()).optional()
+          .describe("Token whitelist for header detection. Defaults to Korean structural keywords (부재기호, 단면, 상부근, 하부근, 늑근, 비고, …). Override only when working with non-standard schedules."),
+        preview_rows: z.number().int().min(1).max(20).optional()
+          .describe("How many rows to include in preview_markdown. Default 8."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false, // selection-dependent
+        openWorldHint: false,
+      },
+    },
+    async (params) => sendAndFormat(wsClient, "parse_grid_schedule", {
+      scope: params.scope,
+      layer: params.layer,
+      tolerance: params.tolerance,
+      header_tokens: params.header_tokens,
+      preview_rows: params.preview_rows,
+    })
+  );
 }
