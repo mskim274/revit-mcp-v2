@@ -19,10 +19,6 @@ namespace AutoCADMCP.Plugin
     /// API calls are marshalled onto the document's main thread via
     /// Application.DocumentManager.ExecuteInCommandContextAsync — the
     /// AutoCAD-native equivalent of Revit.Async.
-    ///
-    /// Phase 4 MVP: no idempotency cache, no overflow protection. Those will
-    /// be ported from RevitWebSocketServer in Phase 5 once the basic loop
-    /// is proven to work end-to-end.
     /// </summary>
     public class AcadWebSocketServer
     {
@@ -31,6 +27,31 @@ namespace AutoCADMCP.Plugin
         private HttpListener _httpListener;
         private CancellationTokenSource _cts;
         private Task _listenTask;
+
+        // Tier 1 harness — idempotency cache. Same shape as Revit MCP's:
+        // re-sending a side-effect command with the same idempotency key
+        // (or request id) within the TTL returns the cached response and
+        // skips the AutoCAD API call. Read-only commands are never cached.
+        private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromMinutes(15);
+        private readonly Dictionary<string, CachedResult> _idempotencyCache =
+            new Dictionary<string, CachedResult>();
+        private readonly object _cacheLock = new object();
+        private int _cacheWritesSinceLastPrune = 0;
+
+        private class CachedResult
+        {
+            public string SerializedResponse { get; set; }
+            public DateTime CachedAt { get; set; }
+        }
+
+        // Commands whose responses we cache. Conservative — must match what
+        // RevitWebSocketServer caches, kept in sync.
+        private static readonly HashSet<string> _sideEffectPrefixes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "create_", "modify_", "delete_", "move_", "copy_", "mirror_",
+            "rotate_", "array_", "rename_", "place_", "load_", "purge_",
+            "set_", "batch_create_", "fix_",
+        };
 
         public AcadWebSocketServer(int port = 8182)
         {
@@ -181,6 +202,17 @@ namespace AutoCADMCP.Plugin
                 var parameters = ConvertJsonElement(paramsEl) as Dictionary<string, object>
                                  ?? new Dictionary<string, object>();
 
+                // Idempotency cache lookup for side-effect commands.
+                var idempotencyKey = ExtractIdempotencyKey(parameters, id);
+                if (IsSideEffectCommand(commandName) && idempotencyKey != null)
+                {
+                    if (TryGetCached(idempotencyKey, out var cached))
+                    {
+                        Debug.WriteLine($"[AutoCADMCP] Idempotency hit for {commandName} (key={idempotencyKey})");
+                        return cached;
+                    }
+                }
+
                 var command = _dispatcher.GetCommand(commandName);
 
                 // Marshal to AutoCAD's main thread. ExecuteInCommandContextAsync
@@ -233,7 +265,14 @@ namespace AutoCADMCP.Plugin
                         recoverable: true, suggestion: result.Suggestion);
                 }
 
-                return SuccessEnvelope(id, result.Data);
+                var responseJson = SuccessEnvelope(id, result.Data);
+
+                // Cache successful side-effect responses so a retry returns
+                // the same payload instead of re-executing the AutoCAD call.
+                if (IsSideEffectCommand(commandName) && idempotencyKey != null)
+                    StoreCached(idempotencyKey, responseJson);
+
+                return responseJson;
             }
             catch (JsonException ex)
             {
@@ -245,6 +284,64 @@ namespace AutoCADMCP.Plugin
                 return ErrorEnvelope(id, "INTERNAL_ERROR",
                     $"{ex.GetType().Name}: {ex.Message}", recoverable: false);
             }
+        }
+
+        // ─── Idempotency cache ─────────────────────────────────────────
+
+        private static bool IsSideEffectCommand(string commandName)
+        {
+            foreach (var prefix in _sideEffectPrefixes)
+                if (commandName.StartsWith(prefix, StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        private static string ExtractIdempotencyKey(Dictionary<string, object> parameters, string requestId)
+        {
+            if (parameters.TryGetValue("idempotency_key", out var v) && v is string s && !string.IsNullOrEmpty(s))
+                return s;
+            return string.IsNullOrEmpty(requestId) ? null : requestId;
+        }
+
+        private bool TryGetCached(string key, out string responseJson)
+        {
+            lock (_cacheLock)
+            {
+                if (_idempotencyCache.TryGetValue(key, out var entry))
+                {
+                    if (DateTime.UtcNow - entry.CachedAt < IdempotencyTtl)
+                    {
+                        responseJson = entry.SerializedResponse;
+                        return true;
+                    }
+                    _idempotencyCache.Remove(key);
+                }
+            }
+            responseJson = null;
+            return false;
+        }
+
+        private void StoreCached(string key, string responseJson)
+        {
+            lock (_cacheLock)
+            {
+                _idempotencyCache[key] = new CachedResult
+                {
+                    SerializedResponse = responseJson,
+                    CachedAt = DateTime.UtcNow,
+                };
+                _cacheWritesSinceLastPrune++;
+                if (_cacheWritesSinceLastPrune >= 50) PruneExpired_NoLock();
+            }
+        }
+
+        private void PruneExpired_NoLock()
+        {
+            var cutoff = DateTime.UtcNow - IdempotencyTtl;
+            var expired = new List<string>();
+            foreach (var kv in _idempotencyCache)
+                if (kv.Value.CachedAt < cutoff) expired.Add(kv.Key);
+            foreach (var k in expired) _idempotencyCache.Remove(k);
+            _cacheWritesSinceLastPrune = 0;
         }
 
         // ─── JSON helpers ──────────────────────────────────────────────

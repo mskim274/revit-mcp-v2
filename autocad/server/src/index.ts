@@ -11,6 +11,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { AcadWebSocketClient } from "./services/websocket-client.js";
 import { registerUtilityTools } from "./tools/utility.js";
+import { registerQueryTools } from "./tools/query.js";
+import { registerCreateTools } from "./tools/create.js";
 
 async function main(): Promise<void> {
   const server = new McpServer({
@@ -21,8 +23,8 @@ async function main(): Promise<void> {
   const wsClient = new AcadWebSocketClient();
 
   registerUtilityTools(server, wsClient);
-  // Phase 5: registerQueryTools(server, wsClient);
-  // Phase 5: registerCreateTools(server, wsClient);
+  registerQueryTools(server, wsClient);
+  registerCreateTools(server, wsClient);
 
   wsClient.connect().catch((error) => {
     console.error(
