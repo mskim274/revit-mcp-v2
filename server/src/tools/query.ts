@@ -272,4 +272,73 @@ Use this as the first query to understand what's in the model before using revit
       });
     }
   );
+
+  server.registerTool(
+    "revit_get_selected_elements",
+    {
+      title: "Get Currently Selected Revit Elements",
+      description: `Returns the user's current Revit UI selection — the elements they have highlighted in Revit before invoking this tool.
+
+Use when the user says things like "현재 선택한 ...", "선택한 요소들", "the elements I picked" — anything implying they've selected items in Revit's UI.
+
+Each element reports id, name, category, type_name, family_name, level, and a location summary (point or curve start/end + length). Aggregates: count, by_category, by_level. Returns count=0 with a hint if nothing is selected.
+
+Set include_parameters=true to add a small set of hot parameters (area, volume, height, mark, comments) per element — heavier, only when needed. Default limit=500, max=1000; aggregates always reflect the full selection even when truncated.`,
+      inputSchema: {
+        include_parameters: z.boolean().optional()
+          .describe("Add a small set of hot parameters (area, volume, height, mark, comments) per element. Default false."),
+        limit: z.number().int().min(1).max(1000).optional()
+          .describe("Max elements in the 'elements' array. Default 500. Aggregates count the full selection regardless."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false, // selection state can change between calls
+        openWorldHint: false,
+      },
+    },
+    async (params) => sendAndFormat(wsClient, "get_selected_elements", {
+      include_parameters: params.include_parameters,
+      limit: params.limit,
+    })
+  );
+
+  server.registerTool(
+    "revit_get_element_geometry",
+    {
+      title: "Get Element Geometry Primitives",
+      description: `Returns geometry primitives (bounding box, faces, edges, solids) for one or more elements. Useful when an LLM needs to reason about spatial relationships — "find walls intersecting this slab", "which beams overlap in plan", clearance checks, etc.
+
+Default summary mode: per-element bounding_box + face_count + edge_count + solid_count + total_volume + total_surface_area. Set detail=true to add face metadata (area, normal, planar/cylindrical type, origin, axis/radius for cylindrical), edge endpoints + length + curve type.
+
+Element ID resolution: pass element_ids:[123,456,...] explicitly, OR call with no element_ids to use the current UI selection (PICKFIRST).
+
+All distances/areas/volumes are returned in Revit internal feet (1 ft = 304.8 mm). Caps: max_faces default 50, max_edges default 100 per element to prevent response bloat on detailed families.`,
+      inputSchema: {
+        element_ids: z.array(z.number().int()).optional()
+          .describe("Explicit list of element IDs. If omitted, uses the current UI selection."),
+        detail: z.boolean().optional()
+          .describe("Include face/edge/solid detail (heavier). Default false (summary only)."),
+        include_geometry_view: z.enum(["Coarse", "Medium", "Fine"]).optional()
+          .describe("Geometry detail level for traversal. Default 'Coarse'."),
+        max_faces: z.number().int().min(1).max(500).optional()
+          .describe("Per-element face cap when detail=true. Default 50."),
+        max_edges: z.number().int().min(1).max(2000).optional()
+          .describe("Per-element edge cap when detail=true. Default 100."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => sendAndFormat(wsClient, "get_element_geometry", {
+      element_ids: params.element_ids,
+      detail: params.detail,
+      include_geometry_view: params.include_geometry_view,
+      max_faces: params.max_faces,
+      max_edges: params.max_edges,
+    })
+  );
 }

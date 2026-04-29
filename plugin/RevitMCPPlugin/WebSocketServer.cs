@@ -243,7 +243,33 @@ namespace RevitMCP.Plugin
 
                     var command = _dispatcher.GetCommand(request.Command);
                     var nativeParams = ConvertJsonElements(request.Params);
-                    var cmdResult = command.ExecuteAsync(doc, nativeParams, linkedCts.Token).Result;
+
+                    // Capture current UI selection BEFORE invoking the
+                    // command so commands like get_selected_elements can
+                    // read SelectionContext.Current. (CommandSet only
+                    // receives Document, not UIDocument — same problem we
+                    // solved on the AutoCAD side with a static context.)
+                    try
+                    {
+                        var sel = _uiApp.ActiveUIDocument?.Selection?.GetElementIds();
+                        SelectionContext.Current = sel != null
+                            ? System.Linq.Enumerable.ToArray(sel)
+                            : Array.Empty<ElementId>();
+                    }
+                    catch
+                    {
+                        SelectionContext.Current = Array.Empty<ElementId>();
+                    }
+
+                    CommandResult cmdResult;
+                    try
+                    {
+                        cmdResult = command.ExecuteAsync(doc, nativeParams, linkedCts.Token).Result;
+                    }
+                    finally
+                    {
+                        SelectionContext.Current = Array.Empty<ElementId>();
+                    }
 
                     // Post-process UI actions that need UIDocument
                     if (cmdResult.Success && cmdResult.Data is Dictionary<string, object> data)
