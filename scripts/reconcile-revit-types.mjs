@@ -227,6 +227,22 @@ async function processGroup(g, summary) {
       targetTypeId[t.name] = r.new_type_id;
       console.log(`  ✓ duplicate → "${t.name}" (id=${r.new_type_id})`);
     } catch (e) {
+      // Already-exists recovery: look up by name in the family
+      if (/already exists/.test(e.message)) {
+        try {
+          const fam = await callRevit("get_family_types", {
+            family_name: "M_Concrete-Rectangular Beam",
+            include_types: true,
+          });
+          const family = (fam.families || []).find(f => f.name === "M_Concrete-Rectangular Beam");
+          const existing = family?.types?.find(t2 => t2.name === t.name);
+          if (existing) {
+            targetTypeId[t.name] = existing.id;
+            console.log(`  ↺ "${t.name}" already exists (id=${existing.id}) — reusing`);
+            continue;
+          }
+        } catch { /* fall through */ }
+      }
       summary.errors.push({ group: `${g.base}/${g.size}`, error: `duplicate ${t.name}: ${e.message}` });
       return;
     }
@@ -309,17 +325,26 @@ async function processGroup(g, summary) {
       continue;
     }
 
-    // ── Execute moves ──
+    // ── Execute moves (chunked to avoid WebSocket timeout) ──
+    const BATCH_SIZE = 10; // smaller chunks to stay well under WS timeout (~25s for 20 was tight)
     for (const [targetName, ids] of assignedToTarget) {
       const newId = targetTypeId[targetName];
       if (!newId || typeof newId !== "number") continue;
-      try {
-        const r = await callRevit("change_instance_type", { instance_ids: ids, new_type_id: newId });
-        summary.reassigned += r.changed_count;
-        console.log(`    ✓ moved ${r.changed_count}/${ids.length} → ${targetName.replace(/^[A-Za-z_]+_RC,\s*/, "")}`);
-      } catch (e) {
-        summary.errors.push({ group: `${g.base}/${g.size}`, error: `move to ${targetName}: ${e.message}` });
+      let totalMoved = 0;
+      let totalFailed = 0;
+      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+        const chunk = ids.slice(i, i + BATCH_SIZE);
+        try {
+          const r = await callRevit("change_instance_type", { instance_ids: chunk, new_type_id: newId });
+          totalMoved += r.changed_count;
+          totalFailed += r.failed_count;
+        } catch (e) {
+          summary.errors.push({ group: `${g.base}/${g.size}`, error: `move to ${targetName} (chunk ${i}-${i + chunk.length}): ${e.message}` });
+          totalFailed += chunk.length;
+        }
       }
+      summary.reassigned += totalMoved;
+      console.log(`    ✓ moved ${totalMoved}/${ids.length} → ${targetName.replace(/^[A-Za-z_]+_RC,\s*/, "")}${totalFailed ? ` (${totalFailed} failed)` : ""}`);
     }
 
     // ── Handle (확인필요) ──

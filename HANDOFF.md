@@ -10,89 +10,102 @@ any machine) can pick up in under a minute.
 
 ---
 
-## Current state — 2026-04-29 (in-flight: RC schedule reconciliation)
+## Current state — 2026-04-29 저녁 (RC reconciliation: 거의 완료)
 
 ### Active task: 엑셀 일람표 → Revit 타입 자동 동기화
 
 엑셀 `RC_Beam_Schedule.xlsx` (1091 entries 타입정리)에 정리된 RC 보
-타입을, Revit 패밀리 `M_Concrete-Rectangular Beam`(811 types)의 실제
-타입에 1:1 반영하는 작업.
+타입을, Revit 패밀리 `M_Concrete-Rectangular Beam`에 1:1 반영.
 
-**진행 누계 (Excel order)**:
+### 처리 완료 단계
 
-| Base | 결과 | Instances 영향 |
-|---|---|---|
-| ACG2 | ✓ smoke test (B1F-3F 45 + 4F 5) | 50 |
-| ACG22 | ✓ 자동 (B1F-3F 4 + 4F 2 + orphan 삭제) | 6 |
-| ACG23 | ✓ 변경 불필요 (Option B로 1F,3F 합쳐서 일치) | 0 |
-| AG0 | ✓ 자동 (5F 유지 + B1F-2F → B1F-3F 10 + 4F 2) | 12 |
-| **AG0A** | ❌ **워크쉐어링 충돌**(다른 사용자 락) | 1개 분실 (43→42) |
+**1. Floor 변경 필요 (143 base)** — `reconcile-auto.mjs` 자동 batch
+- ~1,612 instances 재배정, 94 orphan 삭제
+- 1개 (G0) + 1개 (B0B) 사이즈 불일치 케이스는 **수동으로
+  `(확인필요-실제500x700)` rename**으로 표시 (G0 73개, B0B 29개 instances)
 
-총 70 instances 재배정, orphan 2개 삭제.
+**2. 신규 생성 필요 (177)** — `create-missing-types.mjs`
+- 177 타입 모두 신규 생성, b/h 자동 보정 (mm → ft 변환)
+- 2건 "already exists" → rename trick으로 우회
 
-### 다음 세션에서 재시작
+**3. Size 불일치 (61)** — `modify-size-mismatch.mjs`
+- ~1,269 instances Excel 기준 사이즈로 이동
+- 59 orphan 삭제 (사이즈 잘못된 타입)
+- Auto-create missing target with b/h modify
 
-```powershell
-git pull                                    # HEAD = 42203d9
-.\scripts\build-and-deploy.ps1 -RevitVersion 2025
-```
+**4. 깨진 한글 정정 (14)** — `fix-broken-korean.mjs`
+- "전체" → "전층" 일괄 변경 (Revit 14 + Excel 29 cells)
+- 원인: Python execAsync 출력이 cp949로 잘못 디코딩
 
-1. **Revit 시작** + 같은 프로젝트 (워크쉐어링 충돌 피하려면 단독 시간대 또는 Detach from Central)
-2. **AG0A 재시도** (이전 시도 롤백됨, 새 type 2개 사라짐, 원본 그대로):
-   ```bash
-   ONLY_BASE=AG0A node scripts/reconcile-revit-types.mjs
-   ```
-3. **다음 base들** (엑셀 타입정리 순서):
-   AG0B → AG0C → AG0D → AG1 → AG10 → ... (총 ~145개 남음)
+**총 ~2,881 instances 정렬 완료, 184+ orphan 삭제.**
 
-각 base마다 dry-run → 사용자 확인 → 실행 패턴 유지:
-```bash
-DRY_RUN=1 ONLY_BASE=<base> node scripts/reconcile-revit-types.mjs
-ONLY_BASE=<base> node scripts/reconcile-revit-types.mjs   # 확인 후
-```
+### 최종 매칭 상태 (compare 결과)
+
+| 분류 | 시작 | 종료 | 변화 |
+|---|---|---|---|
+| ✅ 일치 | 577 | **965** | +388 (88.5%) |
+| ❌ 신규 생성 | 177 | **0** | -177 ✅ |
+| 🔄 Floor 변경 | 247 | 37 | -210 |
+| ⚡ Size 불일치 | 63 | (해결) | -63 ✅ |
+| ⚠️ 미반영 | - | 127 | (잔여) |
 
 ### 적용된 핵심 결정
 
-- **Option B (원본 라벨 보존)**: `1,3ACG23` 같은 단일 라벨 다중 floor를
-  split하지 않고 "1F,3F" 한 type으로 유지. `add_type_summary.py`의
-  `convert_floor_label()` 참조.
-- **(확인필요) 마커**: SK_FL이 어느 새 타겟에도 안 맞는 instances는
-  `<source_name>(확인필요)` 타입으로 이동 → 모델러 검토용.
-- **Orphan 자동 삭제**: redistribution 후 비어있는 source type 자동 삭제
-  (`PURGE_ORPHANS` 기본값 on, `NO_PURGE=1`로 끔).
+- **Option B (원본 라벨 보존)**: `1,3ACG23` 같은 단일 라벨 다중 floor →
+  split하지 않고 "1F,3F" 한 type으로 유지.
+- **(확인필요-실제size)**: Excel과 Revit 사이즈 불일치 케이스 marker로 표시.
+- **(확인필요-사이즈)**: 자동 매칭 안 되는 ambiguous 케이스 marker.
+- **Orphan 자동 삭제**: redistribution 후 비어있는 source type 자동 삭제.
+- **전층** (not 전체): "ALL" 접두사 부호의 한국어 표기.
 
-### 신규 Revit MCP 명령 (b8109a9에서 추가됨)
+### 신규 Revit MCP 명령 (b8109a9에서 추가)
 
 | 도구 | 역할 |
 |---|---|
 | `revit_duplicate_type` | ElementType.Duplicate(name) |
-| `revit_rename_type` | ElementType.Name = newName (idempotent) |
+| `revit_rename_type` | ElementType.Name = newName |
 | `revit_change_instance_type` | Element.ChangeTypeId, batch 1~1000 |
 
-### 핵심 파일
+### 작업 도구 (scripts/)
 
 ```
-scripts/reconcile-revit-types.mjs   ← 메인 자동화 (HEAD)
-scripts/analyze-rc-beams.mjs        ← AutoCAD 일람표 추출
-scripts/verify-rc-beams.mjs         ← 일람표 검증
-%TEMP%\add_type_summary.py          ← 타입정리 시트 생성기
-%TEMP%\compare_revit_excel.py       ← Revit매칭 시트 생성기
-~\Desktop\RC_Beam_Schedule.xlsx     ← 작업 입력
+reconcile-revit-types.mjs    ← Floor 변경 batch (multi-source aware)
+reconcile-auto.mjs           ← 자동 진행 wrapper (dry-run + execute)
+create-missing-types.mjs     ← 신규 타입 생성 + b/h 자동 보정
+modify-size-mismatch.mjs     ← Size 불일치 처리 (auto-create missing targets)
+fix-broken-korean.mjs        ← 한글 인코딩 깨짐 일괄 수정
+analyze-rc-beams.mjs         ← AutoCAD 일람표 추출
+verify-rc-beams.mjs          ← 일람표 검증
+%TEMP%\add_type_summary.py   ← 타입정리 시트 생성기
+%TEMP%\compare_revit_excel.py ← Revit매칭 시트 생성기
+%TEMP%\add_action_log.py     ← 비고 컬럼 + 처리내역 시트 추가
 ```
 
-### 워크쉐어링 주의
+### 엑셀 시트 구조 (RC_Beam_Schedule.xlsx)
 
-- AG0A 실패 원인: 다른 사용자가 element 락
-- 권장: 단독 시간대, Detach from Central, 또는 Sync to Central 자주
-- 큰 변경 전후로 동기화 필수
+```
+처리내역      ← NEW: 단계별 결과 + 사용 도구/스크립트 요약
+타입정리       ← 1091 entries + 비고 컬럼 (✅ 기존 유지 / ✅ 신규 생성 / ⚠️ 미반영)
+Revit매칭     ← 5 카테고리별 비교 결과
+RC Beam Schedule ← 원본 1091 entries (시트별)
+시트별 요약    ← 50 시트 카운트
+출처          ← 메타데이터
+```
 
-### 추가 작업 (Floor 변경 후 단계)
+### 잔여 작업
 
-- [ ] AG0A 재시도
-- [ ] 엑셀 타입정리 순서로 나머지 ~145개 base
-- [ ] **신규 생성 필요 177개** — 현재 스크립트는 Floor 변경 + 일치만 다룸. 별도 처리 필요
-- [ ] **Size 불일치 63개** — 사용자 결정 필요 (도면 vs Revit 어느 것이 맞나)
-- [ ] 모든 작업 후 (확인필요) 타입들 모델러와 함께 검토
+- [ ] **127 미반영** entries 검토 — 형식 차이 또는 잔여 floor 변경 (37건)
+- [ ] **(확인필요) 타입들** 모델러와 함께 도면 직접 검토
+  - G0: 73 instances 사이즈 변경 필요
+  - B0B: 29 instances 사이즈 변경 필요
+- [ ] Sync to Central 권장
+- [ ] 다른 패밀리 (M_Concrete-Rectangular Column 등)에 동일 워크플로우 적용 가능
+
+### Workshare 주의
+
+- Workshared 모델에서 다른 사용자 락 시 트랜잭션 cancel
+- WS timeout (25s) 회피 위해 batch size 10으로 chunked
+- 권장: 단독 시간대, Sync 자주
 
 ### Last commit
 `42203d9` — Reconcile script v2 — multi-source aware + 일치 section + comma-floor
