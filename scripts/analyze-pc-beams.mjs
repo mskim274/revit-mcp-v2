@@ -118,10 +118,15 @@ for (const g of groups) {
   const horizLeaf = horiz.filter(d => isLeafX(d, horiz));
   const vertLeaf = vert.filter(d => isLeaf(d, vert));
 
-  // B = max horizontal leaf
+  // B = max horizontal leaf (concrete bottom width)
   const B = Math.max(0, ...horizLeaf.map(d => d.measurement));
-  // D = max vertical leaf
-  const D = Math.max(0, ...vertLeaf.map(d => d.measurement));
+  // D_trunk = max vertical leaf (콘크리트 트렁크 깊이, 중앙부 기준)
+  const D_trunk = Math.max(0, ...vertLeaf.map(d => d.measurement));
+  // D_end = max vertical outer (양단부 최종 = 헌치+슬래브 envelope)
+  const vertOuter = vert.filter(d => !isLeaf(d, vert));
+  const D_end = Math.max(0, ...vertOuter.map(d => d.measurement));
+  // Default D for the schedule = end-section envelope (양단부 최종)
+  const D = D_end > 0 ? D_end : D_trunk;
 
   // Parse L and LL from label
   const lengthMatch = g.label.full.match(/L=([\d.]+)m/);
@@ -131,6 +136,8 @@ for (const g of groups) {
     type: g.label.text,
     B: Math.round(B),
     D: Math.round(D),
+    D_trunk: Math.round(D_trunk),
+    D_end: Math.round(D_end),
     L: lengthMatch ? `${lengthMatch[1]}m` : "?",
     LL: llMatch ? `${llMatch[1]}kN/m²` : "?",
     full: g.label.full,
@@ -152,9 +159,41 @@ for (const r of results) {
   console.log(`    >>> B = ${r.B},  D = ${r.D}`);
 }
 
-console.log(`\n${"=".repeat(76)}`);
-console.log(`타입       | B × D       | L      | LL          | full label`);
-console.log(`${"-".repeat(76)}`);
-for (const r of results) {
-  console.log(`${r.type.padEnd(10)} | ${String(r.B).padStart(4)} × ${String(r.D).padEnd(4)} | ${r.L.padEnd(6)} | ${r.LL.padEnd(11)} | ${r.full}`);
+// Sort by drawing position: row clusters by Y (descending = top→bottom),
+// within row by X ascending (left→right). Reading order matches how the
+// user scans the schedule sheets.
+const ROW_TOL = 1500;  // Y-coordinate tolerance for "same row"
+const sortedResults = [...results];
+// Attach label x/y to each result
+const labelByType = new Map(uniqLabels.map(l => [l.text, l]));
+for (const r of sortedResults) {
+  const l = labelByType.get(r.type);
+  r._x = l?.x ?? 0;
+  r._y = l?.y ?? 0;
+}
+// Cluster Y into rows
+const ys = [...new Set(sortedResults.map(r => r._y))].sort((a, b) => b - a);
+const rowBands = [];
+for (const y of ys) {
+  const last = rowBands[rowBands.length - 1];
+  if (last && Math.abs(last - y) < ROW_TOL) continue;
+  rowBands.push(y);
+}
+function rowIdx(y) {
+  for (let i = 0; i < rowBands.length; i++) if (Math.abs(rowBands[i] - y) < ROW_TOL) return i;
+  return 999;
+}
+sortedResults.sort((a, b) => rowIdx(a._y) - rowIdx(b._y) || a._x - b._x);
+
+console.log(`\n${"=".repeat(108)}`);
+console.log(`# | 타입      | B × D (양단부) | trunk | L      | LL          | row | full label`);
+console.log(`${"-".repeat(108)}`);
+let i = 1;
+let prevRow = -1;
+for (const r of sortedResults) {
+  const row = rowIdx(r._y);
+  if (row !== prevRow && prevRow !== -1) console.log(`${"-".repeat(108)}`);
+  prevRow = row;
+  console.log(`${String(i).padStart(2)} | ${r.type.padEnd(9)} | ${String(r.B).padStart(4)} × ${String(r.D).padEnd(5)}  | ${String(r.D_trunk).padStart(4)}  | ${r.L.padEnd(6)} | ${r.LL.padEnd(11)} | row${row + 1} | ${r.full}`);
+  i++;
 }
