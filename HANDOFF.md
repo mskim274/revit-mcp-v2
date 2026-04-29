@@ -10,7 +10,49 @@ any machine) can pick up in under a minute.
 
 ---
 
-## Current state — 2026-04-29 저녁 (RC reconciliation: 거의 완료)
+## Current state — 2026-04-30 (RC reconciliation: Phase 5 완료)
+
+### 오늘(2026-04-30) 추가 작업
+
+회사 머신에서 Phase 5 진행 — 미반영 127건 분류 + 정합성 보정.
+
+**처리 결과:**
+- **14건 비고 정정** (이미 Revit에 있던 type, Excel 비고만 ⚠️→✅)
+- **25건 placeholder type 신규 생성**:
+  - Case 1: AWG201 Beam→Girder rename
+  - Cases 2-13: 단일 후보 12건 (1F를 source로 가까운 floor placeholder)
+  - Cases 14-25: 다중 후보 11건 (가장 가까운 floor source)
+- **B0 사이즈 보정**: 158 instances (3F:39 + 4F:70 + 5F:49) 500x600→500x700 이동
+  - source 3개 (id 609897, 609813, 609437) 삭제
+  - 패턴: 일람표 도면대로 모델 정합성 보정
+- **30건 type 정리**: 22 orphan + 6 동일사이즈 중복 + 2 already-deleted
+
+**최종 정합성 (Excel 처리내역 시트에 기록):**
+- ✅ Excel-Revit 일치: **1,004 / 1,091** (92.0%)
+  - 기존 유지: 578 / 신규 생성: 426
+- ⚠️ 미반영: **87** (전부 VIOD, 모델 의도적 미반영)
+- 동일 (mark,size,floor) 중복: 0건, 사이즈 mismatch: 0건
+
+**잔여 검증 권장:**
+- 인스턴스 카운트 30,947 → 30,931 (-16) 발견. Sync to Central 후 재확인 필요.
+  825 dependent elements 삭제 중 일부 secondary impact일 수도 (schedule cell, tag 등).
+- VIOD 87건 비고 정리 (가장 안전한 batch): 다음 세션
+
+### 새 도구 (오늘 작성)
+- `scripts/batch-create-single-candidates.mjs` — 11건 일괄 duplicate
+- `scripts/migrate-b0-sizes.mjs` — instance 일괄 type 변경 (batch=10 chunked)
+
+### Workshare 새 발견
+- `change_instance_type` batch=50 → "operation canceled" 발생
+- batch=10이 안전. HANDOFF 권장사항 재확인됨.
+
+### Last commit
+오늘 작업은 아직 **commit 안 됨** (Excel 변경만 — Excel은 gitignored).
+HANDOFF.md 업데이트만 commit 대상.
+
+---
+
+## Earlier — 2026-04-29 저녁 (RC reconciliation: 거의 완료)
 
 ### Active task: 엑셀 일람표 → Revit 타입 자동 동기화
 
