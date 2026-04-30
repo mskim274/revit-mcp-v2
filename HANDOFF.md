@@ -72,6 +72,45 @@ any machine) can pick up in under a minute.
 
 **잔여:** 나머지 12개 시트 (RC기둥 일람표-2~13) 미추출.
 
+### 추가 (오후 늦게): 전체 13시트 추출 시도 → 51개 컬럼 발견
+
+사용자가 도면 전체를 다시 선택해서 877 KB 데이터 추출. **Agent로 위임 시도했지만 컨텍스트 95% 상황에서 시스템이 자동 거부** → 직접 Python 파서로 우회.
+
+**결과 (`scripts/parse-column-schedule.py`):**
+- 전체 entities: 11,742
+- 텍스트 entities: 1,911
+- 컬럼 부호 발견: **51개 (모두 unique)**
+- 파싱 성공: 50/51 (1개 floor row 못 찾음)
+
+**51개 부호 목록:**
+C0, C0A, C0B-1, C0B-2, C1, C1-1, C10, C10-2, C11, C11A-1, C11B,
+C11C, C11C-1, C11CA, C12A-1, C13A, C14, C15, C15-1, C15-2, C15A,
+C15B, C16, C1A, C1A-1, C2, C21, C21-1, C21A, C22, C22-1, C22-2,
+C22-3, C22A, C22B, C22C, C22C-1, C23, C23A, C23C, C24, C2B, C3,
+C3A, C3A-1, C4, C4(R), C4-1, C4-2, C4A, C4B
+
+**발견된 패턴:**
+- 강합성 컬럼 다수 발견 — H형강 매립 (예: `100H 428x407x20x35`,
+  `<PC11C>`, `<P2>`, `1-M19@200(FLG)`)
+- 사이즈/철근 floor별 변경 빈번
+- VOID 셀 존재
+- 좌동 인식 정상 작동
+
+**저장 파일 (둘 다 gitignored 폴더):**
+- `작업자료/2026-04-30/column-schedule-raw.json` — Python 파서 결과 (50 컬럼 raw)
+- `작업자료/2026-04-30/RC_Column_Schedule.xlsx` — 4 컬럼 시트 (이전, 부족)
+
+**다음 세션 작업 (필수):**
+1. raw JSON을 깨끗한 Excel 시트로 변환 (50 컬럼 × 8 row 매트릭스)
+2. row 라벨 정규화 (사이즈/주철근/주근/띠근중앙부/띠근상하부/TIE BAR)
+3. 사이즈/철근 변경점 자동 검출 → Revit type 분리
+4. Revit 명명규칙 매핑: `Column_RC, [부호], [강도], [B×D], [층범위]`
+5. 강합성 컬럼 별도 처리 방안 (RC family 외 별도?)
+6. 모델러 검토 항목 (강도 / VOID 범위 / 부호 prefix)
+
+**도구:**
+- `scripts/parse-column-schedule.py` — 877 KB JSON 직접 파싱 (Agent 우회)
+
 ---
 
 ## Earlier — 2026-04-29 저녁 (RC reconciliation: 거의 완료)
