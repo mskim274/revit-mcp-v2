@@ -47,8 +47,30 @@ any machine) can pick up in under a minute.
 - batch=10이 안전. HANDOFF 권장사항 재확인됨.
 
 ### Last commit
-오늘 작업은 아직 **commit 안 됨** (Excel 변경만 — Excel은 gitignored).
-HANDOFF.md 업데이트만 commit 대상.
+오늘 RC 보 작업 commit 완료 (`9087df6`). 추가로 column 일람표 추출
+시작 — 아직 Revit 반영 전, Excel 정리만 됨.
+
+### 추가: RC 기둥 일람표 추출 시작 (오후)
+
+회사 머신에서 AutoCAD 도면 `A71 기둥일람표/...섹터(B,C섹터) RC기둥 일람표-1~13.dwg`
+의 첫 시트(RC기둥 일람표-1)를 선택해서 파싱.
+
+**추출 결과:** 4 column types — C0, C0A, C0B-1, C0B-2
+
+**Revit 명명규칙(`Column_RC, [부호], [강도], [B×D], [층범위]`)에 매핑:**
+- 6개 type 도출 (VOID 구간 분리 + 주철근 22-D22→22-D19 변경점 분리)
+- 모두 ⚠️ Revit 미반영 상태 (다음 세션에 보 작업과 동일 워크플로우로 반영 예정)
+
+**미해결 가정 (모델러 검토 필요):**
+- 강도: 일람표에 명시 없어서 40MPa 가정 (기존 RC column 다수가 40MPa)
+- C0B-1의 VOID 범위: B1F+1F 둘 다 VOID로 보수 해석 (한 층만일 수도)
+- 부호 prefix: `C0` 그대로 vs `BC0`/`CC0` (B/C 섹터 구분)
+
+**파일:** `작업자료/2026-04-30/RC_Column_Schedule.xlsx` (gitignored)
+- 6 시트 (RC_Beam_Schedule.xlsx와 동일 구조)
+- 도구: `scripts/build-column-schedule.py`
+
+**잔여:** 나머지 12개 시트 (RC기둥 일람표-2~13) 미추출.
 
 ---
 
