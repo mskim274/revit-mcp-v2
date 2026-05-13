@@ -52,8 +52,9 @@ function Build-Version {
         New-Item -ItemType Directory -Path $addinDir -Force | Out-Null
     }
 
-    # Copy DLLs
+    # Copy DLLs + .deps.json (required for .NET 8 dependency resolution on Revit 2025)
     Copy-Item "$outputDir\*.dll" $addinDir -Force
+    Copy-Item "$outputDir\*.deps.json" $addinDir -Force -ErrorAction SilentlyContinue
     Copy-Item "$SrcDir\plugin\revit-mcp.addin" $addinDir -Force
 
     Write-Host "Deployed to: $addinDir" -ForegroundColor Green
