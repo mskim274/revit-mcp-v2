@@ -19,6 +19,7 @@ import { registerQueryTools } from "./tools/query.js";
 import { registerCreateTools } from "./tools/create.js";
 import { registerModifyTools } from "./tools/modify.js";
 import { registerViewTools } from "./tools/view.js";
+import { registerExportTools } from "./tools/export.js";
 
 async function main(): Promise<void> {
   // Initialize MCP Server
@@ -36,8 +37,8 @@ async function main(): Promise<void> {
   registerCreateTools(server, wsClient);
   registerModifyTools(server, wsClient);
   registerViewTools(server, wsClient);
+  registerExportTools(server, wsClient);
 
-  // TODO: Sprint 5 — registerExportTools(server, wsClient);
   // TODO: Sprint 5 — registerAdvancedTools(server, wsClient);
 
   // Attempt initial WebSocket connection (non-blocking)

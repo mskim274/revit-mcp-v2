@@ -281,7 +281,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (20 tools)
+## Tool Inventory (21 tools)
 
 ### Utility (2)
 - `revit_ping` — Connection health check
@@ -309,6 +309,11 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - `revit_isolate_elements` — Isolate or hide in view
 - `revit_reset_view_isolation` — Reset temporary isolation
 - `revit_select_elements` — UI selection/highlight
+
+### Export (1)
+- `revit_export_schedule` — ViewSchedule (일람표) → JSON and/or CSV (UTF-8 BOM by
+  default for Excel/Korean compatibility). Post-export verification (file size,
+  line count). Resolution by `schedule_id` or `schedule_name` (exact → contains).
 
 ## Tested Models
 
