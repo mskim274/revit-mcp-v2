@@ -281,7 +281,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (21 tools)
+## Tool Inventory (23 tools)
 
 ### Utility (2)
 - `revit_ping` — Connection health check
@@ -314,6 +314,18 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - `revit_export_schedule` — ViewSchedule (일람표) → JSON and/or CSV (UTF-8 BOM by
   default for Excel/Korean compatibility). Post-export verification (file size,
   line count). Resolution by `schedule_id` or `schedule_name` (exact → contains).
+
+### Visualize / Review (2)
+- `revit_apply_color_filter` — View-specific graphic override (line + surface fill
+  + transparency + halftone) on elements matched by a selector. Selector =
+  category / type_name (contains | starts_with) / mark / parameter / level / explicit
+  ids. Modes: `apply` / `clear`. Color presets + RGB triple.
+- `revit_tag_by_filter` — Bulk `IndependentTag` creation on every element matched
+  by the same selector. Tag family auto-resolves to the view's default (or pass
+  `tag_type_id`). Single-transaction batch; per-element skip reporting; idempotency
+  cache via `idempotency_key`.
+
+Shared selector helper: `commandset/Helpers/ElementSelector.cs`.
 
 ## Tested Models
 

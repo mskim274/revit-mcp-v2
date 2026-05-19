@@ -20,6 +20,7 @@ import { registerCreateTools } from "./tools/create.js";
 import { registerModifyTools } from "./tools/modify.js";
 import { registerViewTools } from "./tools/view.js";
 import { registerExportTools } from "./tools/export.js";
+import { registerVisualizeTools } from "./tools/visualize.js";
 
 async function main(): Promise<void> {
   // Initialize MCP Server
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
   registerModifyTools(server, wsClient);
   registerViewTools(server, wsClient);
   registerExportTools(server, wsClient);
+  registerVisualizeTools(server, wsClient);
 
   // TODO: Sprint 5 — registerAdvancedTools(server, wsClient);
 
