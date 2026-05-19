@@ -10,7 +10,113 @@ any machine) can pick up in under a minute.
 
 ---
 
-## Current state — 2026-04-30 (RC reconciliation: Phase 5 완료)
+## Current state — 2026-05-13 (Sprint 5: Visualize/Export tools 착수)
+
+### 이번 세션 한 일
+
+**Tool inventory 20 → 23.** 7개 신규 도구 로드맵을 잡고 1~2번을 머지했다.
+시장 조사 (LuDattilo 124 tools, Demolinator 45, Autodesk Revit 2027 native
+MCP) + 우리 RC reconciliation 워크플로우 기반으로 우선순위를 정한 결과.
+
+**빌드 인프라 수정** (`b932aa7`)
+- `scripts/build-and-deploy.ps1`이 `*.deps.json`을 Addins 폴더에 안 옮기던
+  버그 — Revit 2025(net8.0-windows) plugin이 로드 실패하면서
+  `"외부 응용프로그램 'Revit MCP Plugin'을 실행할 수 없습니다"` 다이얼로그가
+  뜨고 .addin 매니페스트에 `<SuppressedWarning>UncaughtException</SuppressedWarning>`이
+  자동 추가됐다. deploy 단계에 `Copy-Item "$outputDir\*.deps.json" ... -ErrorAction
+  SilentlyContinue` 한 줄 추가로 해결.
+
+**#1 revit_export_schedule** (`d43ea52`) — Export 카테고리 신설
+- `commandset/Commands/Export/ExportScheduleCommand.cs`
+- `server/src/tools/export.ts`
+- `ViewSchedule.GetTableData()` 기반. JSON / CSV / both 출력.
+- CSV는 **UTF-8 BOM 기본** (Excel 한국어 Windows에서 cp949 오인식 회피).
+- 해석: schedule_id 우선 → schedule_name (exact → contains). 모호하면
+  후보 나열. 발견 못 하면 `revit_get_views(view_type="Schedule")` 안내.
+- 셀 정규화: `\r\n` → `\n`, RFC 4180 quote escape.
+- 중복 헤더는 JSON에서 `" (2)"`, `" (3)"` 접미사로 disambiguate.
+- 하네스: post-export verification (파일 존재, size, expected vs actual
+  line count). overflow spill은 공유 sendAndFormat이 자동 처리.
+
+**#2 revit_apply_color_filter + revit_tag_by_filter** (`a8cec5e`) —
+review-aid 도구 묶음
+- `commandset/Helpers/ElementSelector.cs` — 공유 selector
+  (element_ids | category | type_name contains/starts_with | mark_contains
+  | parameter_name+value | level_name | view 스코프). structural framing의
+  `참조 레벨` / `Reference Level` 파라미터도 level_name 매칭에 포함.
+- `commandset/Commands/View/ApplyColorFilterCommand.cs` — view 단위
+  graphic override (line + surface foreground/cut + transparency + halftone).
+  컬러: 프리셋 (red/orange/yellow/green/blue/magenta/cyan/gray) 또는 "r,g,b".
+  mode=clear는 OverrideGraphicSettings 빈 객체로 초기화.
+- `commandset/Commands/Create/TagByFilterCommand.cs` — `IndependentTag.Create`
+  bulk. single transaction + per-element skip 리포팅. anchor 휴리스틱:
+  LocationPoint → 점, LocationCurve → 중점, fallback → bbox 중심.
+- `server/src/tools/visualize.ts` — 둘 묶어서 wrap.
+- `plugin/RevitMCPPlugin/WebSocketServer.cs` 의 idempotency-cache
+  prefix 목록에 `apply_` + `tag_` 추가 (15분 dedup window).
+- 하네스: apply는 post-tx에 첫 element 재읽고 `color_match` 리포트,
+  tag는 생성된 tag id를 재조회해 `count_match` 검증.
+
+### 다음 세션 — Task #3 부터
+
+`TaskList`로 확인:
+
+```
+#3. [pending] revit_multi_instance_routing + 리본 버튼     ← 다음 시작
+#4. [pending] revit_create_sheet_batch + revit_place_views_on_sheet
+#5. [pending] revit_execute_script (C# REPL)
+#6. [pending] revit_import_cad_link + DWG schedule sync
+#7. [pending] revit_load_family + revit_link_revit_model
+```
+
+#3는 다른 작업보다 범위가 큼 — plugin UI (RibbonPanel + PushButton),
+auto-port 할당 (8181 충돌 시 8182, 8183 ...), `%TEMP%\revit-mcp\<pid>.json`
+lockfile, MCP server 측에 multi-instance discovery + 파일명 기반 라우팅
+까지. 시작 전에 LinkedIn / Revit ribbon API 한 번 더 검토 권장.
+
+#5 `revit_execute_script`는 보안 요주의 — 임의 C# 코드 실행이라 risk
+classification + 사용자 확인 다이얼로그 필수. Harness Tier 2의
+risk classifier와 같이 묶는 것도 고려해볼만함.
+
+### 7개 도구 추천 근거 (요약)
+
+시장 비교 (May 2026):
+- 우리: 23 tools (Export 1 + Visualize 2 갓 추가)
+- Demolinator (pyRevit): 45
+- schauh11: 53+
+- LuDattilo: 124 (dockable Claude panel, clash detection, model health)
+- **Autodesk Revit 2027 공식 MCP** (Tech Preview) — Anthropic MCP 기반,
+  6 tool groups. 곧 native 통합이 표준이 되는 흐름이라 우리는 한국 시장
+  특화 (cp949 처리, DWG 일람표 sync, SK_FL/SK_ITEM 등 한국 구조 워크플로우)
+  로 차별화하는 게 맞다.
+
+### 작업 흐름 (#1 같이 또 다음 작업할 때 패턴)
+
+1. C# command — `commandset/Commands/{Category}/...Command.cs`
+   - `IRevitCommand` 구현, `Name` = snake_case 매칭, `Category` 분류
+   - Create/Modify는 Transaction 필수, 이름 `"MCP: ..."`
+   - post-tx verification 블록 반환 (`verification.performed=true` + 비교)
+   - 에러 응답에 `suggestion` 포함
+2. TS tool — `server/src/tools/{module}.ts`
+   - `server.registerTool("revit_xxx", { ..., inputSchema, annotations }, ...)`
+   - `sendAndFormat(wsClient, "xxx", { ... })` — overflow spill 자동
+   - read-only면 `readOnlyHint: true`, side-effect면 `false`, 파괴적이면
+     `destructiveHint: true`
+3. `server/src/index.ts`에 `registerXxxTools` 추가
+4. plugin `WebSocketServer.cs` `IsSideEffectCommand` prefix 추가
+   (idempotency cache 적용 범위 확장 필요할 때)
+5. `CLAUDE.md` Tool Inventory 수 + 섹션 갱신
+6. 빌드: `.\scripts\build-and-deploy.ps1 -RevitVersion 2025` (Revit 종료 상태)
+7. commit + push
+
+### 무관 변경 (남아있음)
+
+- `package-lock.json` 한 줄 modified — `"peer": true` 제거. column 작업
+  무관. 다른 컨텍스트의 흔적이라 그대로 두는 중. 필요 시 별도 정리.
+
+---
+
+## Earlier — 2026-04-30 (RC reconciliation: Phase 5 완료)
 
 ### 오늘(2026-04-30) 추가 작업
 
