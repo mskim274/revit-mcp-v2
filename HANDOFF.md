@@ -10,7 +10,80 @@ any machine) can pick up in under a minute.
 
 ---
 
-## Current state — 2026-05-13 (Sprint 5: Visualize/Export tools 착수)
+## Current state — 2026-06-10 (P0 버그 4건 + batch/query 개선 — 실사용 페인포인트 해소)
+
+### 배경: 실사용 세션에서 발견된 버그들
+
+Y1P1 지원시설 모델에서 SK_* 파라미터 570건 일괄 입력 작업 중 3가지 페인:
+①570번 개별 modify 호출, ②query 페이지네이션 cursor 미작동 (409개 중
+200개만 접근 가능), ③SK_SIZE를 50A→250A로 바꾼 뒤에도 "50A" 검색에
+385개가 잡힘 (stale 캐시로 오인 — 실제로는 `"250A".IndexOf("50A")==1`
+substring false positive). 코드 리뷰 에이전트 2개 + 시장조사로 원인
+확정 후 일괄 수정.
+
+### 이번 세션 한 일 (tool inventory 28 → 29)
+
+**P0 버그 수정 4건**
+1. `QueryElementsCommand.cs` — parameter_value 매칭이 contains였던 것을
+   **exact 기본**으로 변경 + `match_mode` (exact/contains/empty) 추가.
+   `empty` = 파라미터 존재하나 값 없음 ("빈 칸 찾기").
+2. `QueryElementsCommand.cs` — paginated 응답에 **`next_cursor` 발급**
+   (기존엔 파싱 코드만 있고 생성 코드가 없는 write-only 기능이었음)
+   + `ParseCursor`에 평문 정수 fallback ("200" → offset 200. 기존엔
+   base64 실패를 빈 catch가 삼키고 무성으로 첫 페이지 재반환).
+3. `ElementSelector.cs` — category fallback 데드코드 수정. AppliedFilters에
+   넣은 `"category=X (post-filter)"` 문자열이 자기 자신의 StartsWith 검사에
+   걸려 post-filter가 절대 실행 안 됨 → 비BIC 카테고리명이면 color_filter/
+   tag가 전체 모델(MaxCount 10,000) 대상이 되는 위험. bool 플래그로 교체.
+4. `WebSocketServer.cs` — `ReceiveAsync` 단일 호출이 `EndOfMessage` 확인
+   없이 64KB 초과/분할 프레임을 자르던 것 → MemoryStream 누적 루프 +
+   16MB 상한. batch 명령 선행 조건.
+
+**P1 신규 기능**
+5. `BatchModifyParametersCommand.cs` (신규) + `revit_batch_modify_parameters`
+   — N건을 단일 트랜잭션으로. 입력 A: `modifications` 배열(요소별 다른 값),
+   입력 B: `element_ids`+`parameters` 맵(균일 스탬핑). **`only_if_empty=true`**
+   = 빈 파라미터만 채움(이번 실사용 "빈 칸만 채우기" 룰 그대로). 실패 항목
+   개별 리포팅 + 성공분 일괄 commit. max 5000 set. 트랜잭션 루프 안에서는
+   ThrowIfCancellationRequested **안 함** (workshared "operation canceled"
+   회피 — 2026-04-30 발견 사항 반영).
+   `WebSocketServer.cs`의 idempotency prefix `batch_create_` → `batch_`로
+   일반화 (batch_modify_도 캐시 적용).
+6. `query_elements`에 `ids_only` (페이지 기본 5000/최대 10000 — ID만 반환,
+   88KB 스필 해소) + `group_by_parameter` (값별 개수 분포 — "지름별 SK_SIZE
+   분포" 한 번에).
+
+**빌드**: TS `npm run build` ✅ / C# net8.0-windows plugin+commandset ✅
+(net48은 UpdateChecker HttpClient 기존 이슈로 이전부터 실패 — 이번 변경 무관)
+
+### 미적용 권고 (다음 후보, 코드 리뷰에서 나온 것)
+
+- TS `websocket-client.ts` lazy reconnect (10회 실패 후 영구 포기 → sendCommand에서 재시도)
+- `export.ts` EXPORT_TIMEOUT_MS 정의만 되고 미전달 (대형 일람표 30s 타임아웃)
+- delete/move/copy zod `.max()` 제약 누락 (설명에만 있음)
+- create/modify 도구에 `idempotency_key` 미노출 (tag/batch만 있음)
+- workshared 체크아웃 사전 검사 (`WorksharingUtils`) 전무
+- `WebSocketServer.cs:267` `.Result` 동기 블로킹 (진짜 async 명령 추가 시 데드락)
+- MCP 스펙: structuredContent/outputSchema, 스필 파일 resources 노출, elicitation(execute_script용)
+- 시장조사 기반 신규 도구 후보: **create_pipe (CAD 종단도→파이프 파이프라인 완성 — 킬러)**,
+  quantity_takeoff, detect_collisions, view snapshot, model health.
+  Autodesk Revit 2027 공식 MCP는 read-only 6그룹 → read는 commodity화,
+  write 안전성 + 한국 워크플로 + CAD 연계가 차별화 방향.
+
+### 다음 세션 시작점
+
+기존 7-tool 로드맵 (#3 multi-instance routing, #4 sheet batch, #5
+execute_script, #6 import_cad_link, #7 load_family)은 그대로 유효.
+이번에 추가된 후보들과 합쳐 우선순위 재조정 권장 — create_pipe가
+실사용 가치 최상.
+
+⚠️ C# 변경분은 Revit 재시작 + `.\scripts\build-and-deploy.ps1 -RevitVersion
+2025` (Revit 종료 상태) 후 반영됨. 이번 세션은 빌드 검증까지만 — 배포는
+Revit이 켜져 있어 보류.
+
+---
+
+## Earlier — 2026-05-13 (Sprint 5: Visualize/Export tools 착수)
 
 ### 이번 세션 한 일
 

@@ -244,6 +244,46 @@ REVIT_MCP_PORT=8181                                      # WebSocket port (optio
 When these env vars are empty (e.g., on the GitHub runner), the csproj
 automatically falls back to the Nice3point.Revit.Api NuGet packages.
 
+## AI-First Tool Design Principles (이 MCP의 사용자는 Claude다)
+
+이 서버의 최종 사용자는 사람이 아니라 **AI 에이전트(Claude)**다. 사람용
+도구와는 판단 기준이 다르다 — 아래 원칙이 모든 신규/기존 도구 설계에
+우선한다. (근거 사고들은 Known Pitfalls 참조.)
+
+1. **정직한 계약 (Honest Contract)** — 도구 응답이 곧 Claude의 현실이다.
+   - 매칭 의미론을 description에 명시할 것 (exact인지 contains인지).
+     모호하면 Claude는 확신을 갖고 틀린 행동을 N번 반복한다
+     ("50A" 검색에 "250A"가 걸리던 substring 사고).
+   - 실패를 무성으로 삼키지 말 것. 빈 catch + 기본값 폴백 금지
+     (cursor base64 파싱 실패가 무성으로 첫 페이지를 재반환하던 사고).
+     잘못된 입력은 에러 + suggestion으로 응답한다.
+2. **토큰 = 작업 기억 (Token Budget)** — 응답 크기는 Claude의 컨텍스트
+   예산을 직접 소모한다. summary 기본, `ids_only`/projection 제공.
+   25KB 오버플로 스필은 최후 방어선이지 큰 응답의 면죄부가 아니다.
+3. **배치 합성 (Batch-Composable)** — Claude의 작업 패턴은
+   query → filter → batch 루프다. N건 작업에 N번 호출을 강요하지 말 것
+   (570번 개별 modify 호출 사고 → `batch_modify_parameters`).
+   단일 트랜잭션 + per-item 실패 리포팅이 표준.
+4. **재시도 안전 (Retry-Safe)** — 타임아웃 시 Claude는 자동 재시도한다.
+   모든 side-effect 도구는 `idempotency_key`를 노출할 것.
+5. **자가 복구 (Self-Recovery)** — 모든 에러 응답에 `suggestion` 필수.
+   "무엇이 틀렸나"가 아니라 "다음에 뭘 하면 되나"를 적는다.
+6. **검증 가능 (Verifiable)** — write 도구는 post-tx `verification` 블록을
+   반환한다. Claude가 거짓 성공을 보고하지 않게 하는 장치다.
+7. **롱테일은 escape hatch로** — 도구 카탈로그를 무한히 늘리지 않는다.
+   1층: 견고한 프리미티브 ~30개 (요구의 80% 커버) →
+   2층: `execute_script` C# REPL (로드맵 #5, 나머지 20%) →
+   자주 반복되는 스크립트 패턴만 1층 도구로 승격.
+
+### 신규 도구 체크리스트
+
+- [ ] description에 매칭/단위/한계 의미론이 명시됐는가? (exact/contains, feet/mm, max N)
+- [ ] 기본 응답이 최소인가? (summary 기본, 상세는 opt-in)
+- [ ] N건 처리가 한 호출로 가능한가? (배치 입력 + 단일 트랜잭션)
+- [ ] side-effect면 idempotency_key를 받는가? (`IsSideEffectCommand` prefix 등록 포함)
+- [ ] 실패 시 suggestion이 다음 행동을 제시하는가? 무성 폴백은 없는가?
+- [ ] write면 verification 블록을 반환하는가?
+
 ## Conventions & Rules
 
 ### Naming
@@ -281,16 +321,23 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (23 tools)
+## Tool Inventory (29 tools)
 
 ### Utility (2)
 - `revit_ping` — Connection health check
 - `revit_get_project_info` — Project metadata
 
-### Query (8)
+### Query (10)
 - `revit_get_levels`, `revit_get_views`, `revit_get_grids` — Project structure
-- `revit_query_elements` — Element search with filters + pagination
+- `revit_query_elements` — Element search with filters + pagination.
+  - `match_mode`: `exact` (기본, 대소문자 무시) | `contains` | `empty` (파라미터 존재하나 값 없음).
+    ⚠️ 과거 기본이 contains여서 "50A" 검색에 "250A"가 걸리는 사고가 있었음 — 현재는 exact 기본.
+  - `ids_only`: ID 배열만 반환 (페이지 기본 5000, 최대 10000) — 후속 batch 작업용.
+  - `group_by_parameter`: summary 모드에서 파라미터 값별 개수 분포 반환.
+  - 페이지네이션: `has_more`일 때 `next_cursor` 발급. 평문 정수 cursor("200")도 수용.
 - `revit_get_element_info` — Single element detail
+- `revit_get_element_geometry` — Bounding box / face / edge / solid primitives
+- `revit_get_selected_elements` — Current Revit UI selection
 - `revit_get_types_by_category`, `revit_get_family_types` — Type catalog
 - `revit_get_all_categories` — Available categories
 
@@ -298,11 +345,18 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - `revit_create_wall` — Straight wall between two points
 - `revit_create_floor` — Floor from rectangle or polygon
 
-### Modify (4)
-- `revit_modify_element_parameter` — Set parameter value
+### Modify (8)
+- `revit_modify_element_parameter` — Set parameter value (1건)
+- `revit_batch_modify_parameters` — N건을 **단일 트랜잭션**으로 일괄 설정.
+  입력 A: `modifications` 배열 (요소별 다른 값) / 입력 B: `element_ids` + `parameters` 맵 (균일 스탬핑).
+  `only_if_empty=true` → 빈 파라미터만 채움 (기존 값 보존). 최대 5000 set/call.
+  실패 항목 개별 리포팅, 성공분 일괄 commit. `idempotency_key` 지원.
 - `revit_delete_elements` — Delete by ID (max 100, destructive)
 - `revit_move_elements` — Move by vector (max 500)
 - `revit_copy_elements` — Copy by vector (max 100)
+- `revit_duplicate_type` — ElementType 복제 (CAD 일람표 reconciliation용)
+- `revit_rename_type` — ElementType 이름 변경
+- `revit_change_instance_type` — 인스턴스 타입 재배정 (max 1000, workshared는 batch 10 권장)
 
 ### View (4)
 - `revit_set_active_view` — Switch view (partial name match)
