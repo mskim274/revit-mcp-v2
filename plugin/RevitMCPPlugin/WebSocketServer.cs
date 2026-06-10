@@ -120,28 +120,55 @@ namespace RevitMCP.Plugin
             }
         }
 
+        // Hard cap on a single inbound message — protects against runaway
+        // frame accumulation. Large batch requests stay well under this.
+        private const int MaxInboundMessageBytes = 16 * 1024 * 1024; // 16MB
+
         private async Task HandleConnection(WebSocket ws, CancellationToken ct)
         {
-            var buffer = new byte[64 * 1024]; // 64KB buffer
+            var buffer = new byte[64 * 1024]; // 64KB receive buffer (one frame)
             System.Diagnostics.Debug.WriteLine("[RevitMCP] Client connected");
 
             try
             {
                 while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
                 {
-                    var result = await ws.ReceiveAsync(
-                        new ArraySegment<byte>(buffer), ct);
-
-                    if (result.MessageType == WebSocketMessageType.Close)
+                    // Accumulate frames until EndOfMessage — requests larger
+                    // than the 64KB buffer (e.g. batch element_ids payloads)
+                    // arrive split across multiple frames.
+                    WebSocketReceiveResult result;
+                    string message;
+                    using (var messageStream = new System.IO.MemoryStream())
                     {
-                        await ws.CloseAsync(
-                            WebSocketCloseStatus.NormalClosure, "Closing", ct);
-                        break;
+                        do
+                        {
+                            result = await ws.ReceiveAsync(
+                                new ArraySegment<byte>(buffer), ct);
+
+                            if (result.MessageType == WebSocketMessageType.Close)
+                            {
+                                await ws.CloseAsync(
+                                    WebSocketCloseStatus.NormalClosure, "Closing", ct);
+                                return;
+                            }
+
+                            messageStream.Write(buffer, 0, result.Count);
+
+                            if (messageStream.Length > MaxInboundMessageBytes)
+                            {
+                                await ws.CloseAsync(
+                                    WebSocketCloseStatus.MessageTooBig,
+                                    "Message exceeds 16MB limit", ct);
+                                return;
+                            }
+                        }
+                        while (!result.EndOfMessage);
+
+                        message = Encoding.UTF8.GetString(messageStream.ToArray());
                     }
 
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
-                        var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
                         var response = await HandleMessage(message);
                         var responseBytes = Encoding.UTF8.GetBytes(response);
 
@@ -552,7 +579,7 @@ namespace RevitMCP.Plugin
                 || command.StartsWith("load_")
                 || command.StartsWith("purge_")
                 || command.StartsWith("set_")
-                || command.StartsWith("batch_create_")
+                || command.StartsWith("batch_")  // batch_create_*, batch_modify_*, ...
                 || command.StartsWith("fix_")
                 || command.StartsWith("apply_")  // apply_color_filter etc. — view overrides
                 || command.StartsWith("tag_");   // tag_by_filter etc. — tag instance creation
