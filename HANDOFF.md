@@ -70,12 +70,47 @@ substring false positive). 코드 리뷰 에이전트 2개 + 시장조사로 원
   Autodesk Revit 2027 공식 MCP는 read-only 6그룹 → read는 commodity화,
   write 안전성 + 한국 워크플로 + CAD 연계가 차별화 방향.
 
+### 추가 (같은 날 오후): 로드맵 #5 revit_execute_script 출하 (29 → 30 tools)
+
+"이 MCP의 사용자는 Claude" 원칙의 2층 escape hatch. 전용 도구가 없는
+요구는 Claude가 Revit API C# 코드를 직접 작성해 실행한다.
+
+- `commandset/Commands/Script/ExecuteScriptCommand.cs` (신규)
+  - Roslyn (`Microsoft.CodeAnalysis.CSharp.Scripting` 4.9.2, **net8 전용**
+    PackageReference — net48은 `#if NETFRAMEWORK` 스텁이 "not supported" 반환)
+  - 전역 `ScriptGlobals`: `doc` / `print(object)` / `MmToFt` / `FtToMm`
+  - mode=query: 트랜잭션 자체를 안 열음 → Revit API가 변경 시 throw
+    (물리적 read-only 강제). mode=modify: 단일 트랜잭션 + 예외 시 롤백.
+  - denylist: System.IO/Net/Process/Reflection, new Transaction(도구가 관리),
+    Save/SaveAs/SynchronizeWithCentral, unsafe, DllImport. 샌드박스 아님 —
+    사고 방지 가드.
+  - 컴파일 진단 (line/col + CS코드) 반환 → Claude 자가 수정 루프.
+    런타임 에러에 마지막 print 10줄 첨부. 반환값은 JSON-safe 직렬화
+    (Element→{id,name,category}, XYZ→{x,y,z}, 컬렉션 1000 cap, depth 4).
+- `server/src/tools/script.ts` (신규) + index.ts 등록.
+  timeout_ms 노출 (기본 60s, max 300s — sendAndFormat 4번째 인자로 전달).
+- `WebSocketServer.cs` IsSideEffectCommand에 `execute_` prefix 추가
+  (modify 스크립트 + idempotency_key 재시도 보호).
+- 빌드: TS ✅ / commandset+plugin net8 ✅. Roslyn DLL 4개가 plugin 출력에
+  자동 포함 확인 (CopyLocalLockFileAssemblies) — deploy 스크립트가 *.dll
+  전체를 Addins로 복사하므로 추가 작업 불필요.
+
+알려진 한계 (의도된 v1 트레이드오프):
+- 무한루프는 중단 불가 (Revit UI 스레드 점유 — .NET 8에 Thread.Abort 없음).
+  WS 타임아웃은 Claude에게 에러를 돌려주지만 Revit은 스크립트가 끝날 때까지
+  busy. pyRevit 등 모든 Revit 스크립트 러너의 공통 한계. description에 경고.
+- denylist는 문자열 검사 — 우회 가능하나 위협 모델이 "Claude의 실수 방지"라
+  충분. 사용자 승인 다이얼로그(elicitation)는 v2 후보.
+- Revit 2025 자체 Roslyn(매크로용)과의 어셈블리 버전 충돌 가능성 — 실배포
+  후 첫 실행에서 확인 필요. 충돌 시 AssemblyLoadContext 격리 검토.
+
 ### 다음 세션 시작점
 
-기존 7-tool 로드맵 (#3 multi-instance routing, #4 sheet batch, #5
-execute_script, #6 import_cad_link, #7 load_family)은 그대로 유효.
-이번에 추가된 후보들과 합쳐 우선순위 재조정 권장 — create_pipe가
-실사용 가치 최상.
+기존 7-tool 로드맵 중 **#5 execute_script 완료**. 남은 것: #3
+multi-instance routing, #4 sheet batch, #6 import_cad_link, #7
+load_family. 이번에 추가된 후보들과 합쳐 우선순위 재조정 권장 —
+**create_pipe**가 실사용 가치 최상 (당분간은 execute_script로 파이프
+생성을 때우면서 패턴이 굳으면 1층 도구로 승격하는 경로도 유효).
 
 ⚠️ C# 변경분은 Revit 재시작 + `.\scripts\build-and-deploy.ps1 -RevitVersion
 2025` (Revit 종료 상태) 후 반영됨. 이번 세션은 빌드 검증까지만 — 배포는

@@ -321,7 +321,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (29 tools)
+## Tool Inventory (30 tools)
 
 ### Utility (2)
 - `revit_ping` — Connection health check
@@ -380,6 +380,22 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
   cache via `idempotency_key`.
 
 Shared selector helper: `commandset/Helpers/ElementSelector.cs`.
+
+### Script (1) — 2층 escape hatch (AI-First 원칙 §7)
+- `revit_execute_script` — 임의 C# 코드를 라이브 Document에 실행 (Revit 2025+/net8 전용,
+  net48은 "not supported" 스텁).
+  - **전역**: `doc`, `print(object)`, `MmToFt(d)`, `FtToMm(d)`.
+    자동 import: System / Collections.Generic / Linq / Autodesk.Revit.DB.
+  - **mode**: `query` (기본) = 트랜잭션 없음 → Revit API가 변경을 물리적으로 거부.
+    `modify` = 단일 트랜잭션 "MCP: Script", 런타임 예외 시 전체 롤백.
+  - 마지막 표현식(세미콜론 없음)이 `return_value`로 — Element/ElementId/XYZ/컬렉션
+    자동 직렬화 (1000개 cap, depth 4).
+  - 컴파일 에러는 라인 번호 진단으로 반환 → Claude 자가 수정 루프.
+    런타임 에러엔 마지막 print 10줄 첨부.
+  - **denylist**: 파일/네트워크/프로세스/리플렉션, 수동 Transaction 생성(도구가 관리),
+    Save/SaveAs/SynchronizeWithCentral. 완전한 샌드박스는 아님 — 사고 방지용 가드.
+  - modify 모드는 실행 전 사용자에게 변경 내용 요약을 보여줄 것 (도구 description에 명시).
+  - 자주 반복되는 스크립트 패턴은 1층 정식 도구로 승격한다.
 
 ## Tested Models
 
