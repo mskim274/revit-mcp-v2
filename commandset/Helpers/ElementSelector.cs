@@ -78,17 +78,19 @@ namespace RevitMCP.CommandSet.Helpers
             collector = collector.WhereElementIsNotElementType();
 
             // Category — apply at collector level for performance
+            var categoryAppliedAtCollector = false;
             if (!string.IsNullOrWhiteSpace(opts.Category))
             {
                 var bic = ResolveCategoryFilter(doc, opts.Category);
                 if (bic.HasValue)
                 {
                     collector = collector.OfCategory(bic.Value);
+                    categoryAppliedAtCollector = true;
                     result.AppliedFilters.Add($"category={opts.Category}");
                 }
                 else
                 {
-                    // Fall back to name match on Element.Category
+                    // Fall back to name match on Element.Category (post-filter below)
                     result.AppliedFilters.Add($"category={opts.Category} (post-filter)");
                 }
             }
@@ -97,9 +99,10 @@ namespace RevitMCP.CommandSet.Helpers
             var candidates = collector.ToList();
             result.TotalCandidatesBeforeFilter = candidates.Count;
 
-            // Category name post-filter (fallback for non-BIC categories)
-            if (!string.IsNullOrWhiteSpace(opts.Category)
-                && !result.AppliedFilters.Any(f => f.StartsWith("category=" + opts.Category + (opts.Category.EndsWith(")") ? "" : ""))))
+            // Category name post-filter (fallback for non-BIC categories).
+            // Without this, an unresolved category would silently select the
+            // whole model (up to MaxCount) for color/tag operations.
+            if (!string.IsNullOrWhiteSpace(opts.Category) && !categoryAppliedAtCollector)
             {
                 candidates = candidates
                     .Where(e => e.Category?.Name?.Equals(opts.Category, StringComparison.OrdinalIgnoreCase) == true)
