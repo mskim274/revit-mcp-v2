@@ -16,14 +16,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { RevitWebSocketClient } from "../services/websocket-client.js";
 import { sendAndFormat } from "../services/response-formatter.js";
-import {
-  clampPageSize,
-  parseCursor,
-  createCursor,
-  buildPaginatedResult,
-  formatSummary,
-  formatPaginatedResult,
-} from "../services/pagination.js";
+import { clampPageSize } from "../services/pagination.js";
 
 // Shared annotations for read-only tools
 const READ_ONLY_ANNOTATIONS = {
@@ -45,7 +38,10 @@ export function registerQueryTools(
       description: `Search for Revit elements by category with smart pagination.
 
 **Default behavior (summary mode):** Returns element counts grouped by type and level — safe for any model size.
-**Detail mode (summary_only=false):** Returns paginated element details with cursor-based navigation.
+**Detail mode (summary_only=false):** Returns paginated element details. When has_more=true, pass the returned next_cursor to fetch the next page.
+**ID mode (ids_only=true):** Returns only element IDs — up to 5000 per page (max 10000). Use this when you just need IDs for a follow-up operation.
+
+Parameter value matching is EXACT (case-insensitive) by default. Use match_mode="contains" for substring search, or match_mode="empty" to find elements whose parameter exists but has no value.
 
 Common categories: Walls, Floors, Roofs, Doors, Windows, Columns, StructuralFraming (beams), StructuralColumns, Rooms, Furniture, Pipes, Ducts.
 
@@ -54,7 +50,10 @@ Use revit_get_all_categories first to discover what categories exist in the mode
 Examples:
   - Summary: query_elements(category="Walls") → "523 walls: 3 types across 5 levels"
   - Detail: query_elements(category="Walls", summary_only=false, limit=20) → first 20 walls
-  - Filter: query_elements(category="Walls", level_filter="Level 1") → walls on Level 1`,
+  - IDs: query_elements(category="Pipes", ids_only=true) → all pipe IDs in one call
+  - Filter: query_elements(category="Pipes", parameter_name="SK_SIZE", parameter_value="50A") → exact 50A only (not 250A)
+  - Empty: query_elements(category="Pipes", parameter_name="SK_SIZE", match_mode="empty") → pipes with SK_SIZE unfilled
+  - Distribution: query_elements(category="Pipes", group_by_parameter="SK_SIZE") → count per SK_SIZE value`,
       inputSchema: {
         category: z
           .string()
@@ -64,15 +63,19 @@ Examples:
           .optional()
           .default(true)
           .describe("true = counts only (safe for large models), false = element details"),
+        ids_only: z
+          .boolean()
+          .optional()
+          .describe("Return element IDs only (lightweight — default page 5000, max 10000). Overrides summary_only."),
         limit: z
           .number()
+          .int()
           .optional()
-          .default(50)
-          .describe("Page size for detail mode (1-200, default 50)"),
+          .describe("Page size: detail mode 1-200 (default 50), ids_only mode 1-10000 (default 5000)"),
         cursor: z
           .string()
           .optional()
-          .describe("Pagination cursor from previous response"),
+          .describe("Pagination cursor — pass next_cursor from the previous response (a plain offset number also works)"),
         level_filter: z
           .string()
           .optional()
@@ -88,7 +91,15 @@ Examples:
         parameter_value: z
           .string()
           .optional()
-          .describe("Filter by parameter value (requires parameter_name)"),
+          .describe("Filter by parameter value (requires parameter_name). EXACT case-insensitive match by default — see match_mode."),
+        match_mode: z
+          .enum(["exact", "contains", "empty"])
+          .optional()
+          .describe('Parameter value matching: "exact" (default), "contains" (substring), "empty" (parameter exists but unfilled — ignores parameter_value)'),
+        group_by_parameter: z
+          .string()
+          .optional()
+          .describe("Summary mode only: also return a value→count distribution for this parameter (e.g. SK_SIZE → {250A: 409, D600: 26})"),
       },
       annotations: READ_ONLY_ANNOTATIONS,
     },
@@ -96,12 +107,15 @@ Examples:
       return sendAndFormat(wsClient, "query_elements", {
         category: params.category,
         summary_only: params.summary_only ?? true,
-        limit: clampPageSize(params.limit),
+        ids_only: params.ids_only ?? false,
+        limit: params.ids_only ? (params.limit ?? null) : clampPageSize(params.limit),
         cursor: params.cursor ?? null,
         level_filter: params.level_filter ?? null,
         type_filter: params.type_filter ?? null,
         parameter_name: params.parameter_name ?? null,
         parameter_value: params.parameter_value ?? null,
+        match_mode: params.match_mode ?? null,
+        group_by_parameter: params.group_by_parameter ?? null,
       });
     }
   );

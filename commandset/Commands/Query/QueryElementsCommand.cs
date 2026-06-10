@@ -18,12 +18,18 @@ namespace RevitMCP.CommandSet.Commands.Query
     /// Parameters:
     ///   category        (string, required) — BuiltInCategory name (e.g. "Walls", "StructuralFraming")
     ///   summary_only    (bool, optional)   — true for Tier 1 summary (default: true)
+    ///   ids_only        (bool, optional)   — return element IDs only (default page 5000, max 10000);
+    ///                                        overrides summary_only
     ///   limit           (int, optional)    — page size for Tier 2 (default: 50, max: 200)
     ///   cursor          (string, optional) — pagination cursor for Tier 2
     ///   level_filter    (string, optional) — filter by level name
     ///   type_filter     (string, optional) — filter by type name (contains match)
     ///   parameter_name  (string, optional) — filter by parameter name existence
     ///   parameter_value (string, optional) — filter by parameter value (requires parameter_name)
+    ///   match_mode      (string, optional) — "exact" (default) | "contains" | "empty".
+    ///                                        "empty" matches elements whose parameter exists but has no value.
+    ///   group_by_parameter (string, optional) — summary mode only: adds a value→count
+    ///                                        distribution for the given parameter.
     /// </summary>
     public class QueryElementsCommand : IRevitCommand
     {
@@ -45,15 +51,31 @@ namespace RevitMCP.CommandSet.Commands.Query
                         "Provide a category name like 'Walls', 'StructuralFraming', 'Floors'. Use revit_get_all_categories to see available categories."));
 
                 var summaryOnly = GetParam<bool>(parameters, "summary_only", true);
-                var limit = GetParam<int>(parameters, "limit", 50);
+                var idsOnly = GetParam<bool>(parameters, "ids_only", false);
+                var limit = GetParam<int>(parameters, "limit", 0);
                 var cursor = GetParam<string>(parameters, "cursor", null);
                 var levelFilter = GetParam<string>(parameters, "level_filter", null);
                 var typeFilter = GetParam<string>(parameters, "type_filter", null);
                 var parameterName = GetParam<string>(parameters, "parameter_name", null);
                 var parameterValue = GetParam<string>(parameters, "parameter_value", null);
+                var matchMode = (GetParam<string>(parameters, "match_mode", "exact") ?? "exact").ToLowerInvariant();
+                var groupByParameter = GetParam<string>(parameters, "group_by_parameter", null);
 
-                // Clamp limit
-                limit = Math.Max(1, Math.Min(limit, 200));
+                if (matchMode != "exact" && matchMode != "contains" && matchMode != "empty")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Invalid match_mode: '{matchMode}'",
+                        "Use one of: 'exact' (default), 'contains', 'empty'."));
+
+                // ids_only implies the caller wants the element list, not the summary.
+                if (idsOnly)
+                    summaryOnly = false;
+
+                // Clamp limit. ids_only responses are tiny (one integer per element),
+                // so they get a much larger default page and cap.
+                if (idsOnly)
+                    limit = limit <= 0 ? 5000 : Math.Max(1, Math.Min(limit, 10000));
+                else
+                    limit = limit <= 0 ? 50 : Math.Max(1, Math.Min(limit, 200));
 
                 // Resolve BuiltInCategory
                 if (!TryResolveCategory(categoryName, out BuiltInCategory builtInCat))
@@ -98,9 +120,12 @@ namespace RevitMCP.CommandSet.Commands.Query
                     {
                         var param = e.LookupParameter(parameterName);
                         if (param == null) return false;
+
+                        if (matchMode == "empty")
+                            return IsValueEmpty(param);
+
                         if (string.IsNullOrEmpty(parameterValue)) return true;
-                        return param.AsValueString()?.IndexOf(parameterValue, StringComparison.OrdinalIgnoreCase) >= 0
-                            || param.AsString()?.IndexOf(parameterValue, StringComparison.OrdinalIgnoreCase) >= 0;
+                        return MatchesValue(param, parameterValue, matchMode);
                     }).ToList();
                 }
 
@@ -111,6 +136,9 @@ namespace RevitMCP.CommandSet.Commands.Query
                 {
                     var byType = new Dictionary<string, int>();
                     var byLevel = new Dictionary<string, int>();
+                    var byParamValue = string.IsNullOrEmpty(groupByParameter)
+                        ? null
+                        : new Dictionary<string, int>();
 
                     foreach (var elem in elements)
                     {
@@ -127,9 +155,19 @@ namespace RevitMCP.CommandSet.Commands.Query
                             ? (doc.GetElement(levelId) as Level)?.Name ?? "No Level"
                             : "No Level";
                         byLevel[levelName] = byLevel.TryGetValue(levelName, out var lc) ? lc + 1 : 1;
+
+                        // Group by parameter value (optional)
+                        if (byParamValue != null)
+                        {
+                            var p = elem.LookupParameter(groupByParameter);
+                            var key = p == null ? "(no parameter)"
+                                : IsValueEmpty(p) ? "(empty)"
+                                : (p.AsString() ?? p.AsValueString() ?? "(empty)");
+                            byParamValue[key] = byParamValue.TryGetValue(key, out var pc) ? pc + 1 : 1;
+                        }
                     }
 
-                    return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
+                    var summary = new Dictionary<string, object>
                     {
                         ["mode"] = "summary",
                         ["total"] = elements.Count,
@@ -142,27 +180,46 @@ namespace RevitMCP.CommandSet.Commands.Query
                         {
                             ["level"] = levelFilter ?? "",
                             ["type"] = typeFilter ?? "",
-                            ["parameter"] = parameterName ?? ""
+                            ["parameter"] = parameterName ?? "",
+                            ["match_mode"] = string.IsNullOrEmpty(parameterName) ? "" : matchMode
                         }
-                    }));
+                    };
+
+                    if (byParamValue != null)
+                    {
+                        summary["group_by_parameter"] = groupByParameter;
+                        summary["by_parameter_value"] = byParamValue
+                            .OrderByDescending(kv => kv.Value)
+                            .ToDictionary(kv => kv.Key, kv => kv.Value);
+                    }
+
+                    return Task.FromResult(CommandResult.Ok(summary));
                 }
 
-                // Tier 2: Paginated detail
+                // Tier 2: Paginated detail (or lightweight ID list)
                 var offset = ParseCursor(cursor);
                 var paged = elements.Skip(offset).Take(limit).ToList();
 
-                var items = paged.Select(e => SerializeElement(doc, e)).ToList();
+                var hasMore = (offset + paged.Count) < elements.Count;
+                var nextCursor = hasMore ? CreateCursor(offset + paged.Count) : null;
 
-                return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
+                var result = new Dictionary<string, object>
                 {
-                    ["mode"] = "paginated",
+                    ["mode"] = idsOnly ? "ids" : "paginated",
                     ["total_count"] = elements.Count,
-                    ["returned_count"] = items.Count,
+                    ["returned_count"] = paged.Count,
                     ["offset"] = offset,
                     ["limit"] = limit,
-                    ["has_more"] = (offset + items.Count) < elements.Count,
-                    ["items"] = items
-                }));
+                    ["has_more"] = hasMore,
+                    ["next_cursor"] = nextCursor
+                };
+
+                if (idsOnly)
+                    result["ids"] = paged.Select(e => e.Id.IntegerValue).ToList();
+                else
+                    result["items"] = paged.Select(e => SerializeElement(doc, e)).ToList();
+
+                return Task.FromResult(CommandResult.Ok(result));
             }
             catch (OperationCanceledException)
             {
@@ -239,11 +296,17 @@ namespace RevitMCP.CommandSet.Commands.Query
         }
 
         /// <summary>
-        /// Parse cursor string (base64 "offset:N") to offset integer.
+        /// Parse cursor string to offset integer.
+        /// Accepts both base64 "offset:N" (issued via next_cursor) and plain integers ("200").
         /// </summary>
         private int ParseCursor(string cursor)
         {
             if (string.IsNullOrEmpty(cursor)) return 0;
+
+            // Plain integer cursor — accepted as a direct offset.
+            if (int.TryParse(cursor, out var plainOffset))
+                return Math.Max(0, plainOffset);
+
             try
             {
                 var decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
@@ -252,6 +315,42 @@ namespace RevitMCP.CommandSet.Commands.Query
             }
             catch { }
             return 0;
+        }
+
+        /// <summary>
+        /// Create an opaque cursor for the given offset (base64 "offset:N").
+        /// </summary>
+        private string CreateCursor(int offset)
+        {
+            return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"offset:{offset}"));
+        }
+
+        /// <summary>
+        /// True when the parameter exists but holds no usable value.
+        /// </summary>
+        private static bool IsValueEmpty(Parameter param)
+        {
+            if (!param.HasValue) return true;
+            return string.IsNullOrEmpty(param.AsString()) && string.IsNullOrEmpty(param.AsValueString());
+        }
+
+        /// <summary>
+        /// Compare a parameter's value (AsString or AsValueString) against an expected string.
+        /// mode: "exact" → case-insensitive equality, "contains" → case-insensitive substring.
+        /// </summary>
+        private static bool MatchesValue(Parameter param, string expected, string mode)
+        {
+            var asString = param.AsString();
+            var asValue = param.AsValueString();
+
+            if (mode == "contains")
+            {
+                return (asValue?.IndexOf(expected, StringComparison.OrdinalIgnoreCase) >= 0)
+                    || (asString?.IndexOf(expected, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            return string.Equals(asValue, expected, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(asString, expected, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
