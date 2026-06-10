@@ -3,9 +3,13 @@
  *
  * Tools:
  *   revit_modify_element_parameter — Set a parameter value on an element
+ *   revit_batch_modify_parameters  — Set many parameters in ONE transaction
  *   revit_delete_elements          — Delete one or more elements
  *   revit_move_elements            — Move elements by a translation vector
  *   revit_copy_elements            — Copy elements by a translation vector
+ *   revit_duplicate_type           — Duplicate an ElementType under a new name
+ *   revit_rename_type              — Rename an ElementType
+ *   revit_change_instance_type     — Reassign instances to a different type
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -253,5 +257,73 @@ Limits:
       instance_ids: params.instance_ids,
       new_type_id: params.new_type_id,
     })
+  );
+
+  // ─── revit_batch_modify_parameters ───
+  server.registerTool(
+    "revit_batch_modify_parameters",
+    {
+      title: "Batch Modify Parameters",
+      description: `Set parameter values on MANY elements in a single transaction. Replaces hundreds of individual revit_modify_element_parameter calls (570 calls → 1 call).
+
+Two input shapes — use exactly one:
+  A) modifications: fine-grained list, one entry per set. Use when values differ per element.
+     [{element_id: 123, parameter_name: "SK_SIZE", value: "D600"}, {element_id: 456, parameter_name: "SK_SIZE", value: "D450"}]
+  B) element_ids + parameters: applies every name→value pair to every element. Use for uniform stamping.
+     element_ids=[1,2,3], parameters={"SK_SIZE": "250A", "SK_RM": "COM", "SK_UTIL": "DRAINAGE WORK"}
+
+**only_if_empty=true** — "fill the blanks" mode: parameters that already have a value are skipped (reported as skipped_not_empty), never overwritten. Perfect for stamping standard values without clobbering intentional overrides.
+
+Partial success: failed items are reported individually (element not found, read-only, type mismatch); successful sets commit together. Max 5000 sets per call.
+
+Pass idempotency_key when retrying after a timeout to avoid double-application.`,
+      inputSchema: {
+        modifications: z
+          .array(
+            z.object({
+              element_id: z.number().int().describe("Element ID"),
+              parameter_name: z.string().describe("Parameter name"),
+              value: z
+                .union([z.string(), z.number(), z.boolean()])
+                .describe("New value"),
+              is_type_param: z
+                .boolean()
+                .optional()
+                .describe("Set on the element's type instead (default false)"),
+            })
+          )
+          .max(5000)
+          .optional()
+          .describe("Shape A: explicit per-element modifications (max 5000)"),
+        element_ids: z
+          .array(z.number().int())
+          .max(5000)
+          .optional()
+          .describe("Shape B: element IDs to stamp (combine with 'parameters')"),
+        parameters: z
+          .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+          .optional()
+          .describe('Shape B: name→value map applied to every element, e.g. {"SK_SIZE": "250A"}'),
+        only_if_empty: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Only set parameters that currently have no value (never overwrite)"),
+        idempotency_key: z
+          .string()
+          .optional()
+          .describe("Dedup key for safe retries after timeouts (15min window)"),
+      },
+      annotations: MODIFY_ANNOTATIONS,
+    },
+    async (params) => {
+      return sendAndFormat(wsClient, "batch_modify_parameters", {
+        modifications: params.modifications ?? null,
+        element_ids: params.element_ids ?? null,
+        parameters: params.parameters ?? null,
+        only_if_empty: params.only_if_empty ?? false,
+        idempotency_key: params.idempotency_key ?? null,
+      });
+    }
   );
 }
