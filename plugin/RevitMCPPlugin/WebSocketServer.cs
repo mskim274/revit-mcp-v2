@@ -580,6 +580,7 @@ namespace RevitMCP.Plugin
                 || command.StartsWith("purge_")
                 || command.StartsWith("set_")
                 || command.StartsWith("batch_")  // batch_create_*, batch_modify_*, ...
+                || command.StartsWith("execute_") // execute_script in modify mode
                 || command.StartsWith("fix_")
                 || command.StartsWith("apply_")  // apply_color_filter etc. — view overrides
                 || command.StartsWith("tag_");   // tag_by_filter etc. — tag instance creation

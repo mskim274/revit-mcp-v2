@@ -62,4 +62,11 @@
     <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2025.*" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- Roslyn C# scripting for execute_script (Revit 2025+ / net8 only).
+       net48 builds compile a stub that reports "not supported" —
+       see ExecuteScriptCommand.cs #if NETFRAMEWORK branch. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.9.2" />
+  </ItemGroup>
+
 </Project>
