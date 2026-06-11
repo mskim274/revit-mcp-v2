@@ -321,7 +321,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (30 tools)
+## Tool Inventory (31 tools)
 
 ### Utility (2)
 - `revit_ping` — Connection health check
@@ -341,9 +341,16 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - `revit_get_types_by_category`, `revit_get_family_types` — Type catalog
 - `revit_get_all_categories` — Available categories
 
-### Create (2)
+### Create (3)
 - `revit_create_wall` — Straight wall between two points
 - `revit_create_floor` — Floor from rectangle or polygon
+- `revit_create_pipe_run` — 측량좌표(또는 internal) 점 배열로 연속 배관 + 정점 엘보 자동 생성.
+  **프로젝트 이식성**: `coordinate_mode="survey"`(기본)면 런타임에 `ActiveProjectLocation`을
+  읽어 측량→내부 변환 — 좌표 하드코딩 없음. 회전 부호는 테스트점 왕복으로 자가 판별,
+  어느 프로젝트든 적응. Shared Coordinates 미설정(원점 0,0,0)이면 에러+suggestion.
+  `input_unit` m/mm, `pipe_type`(이름 contains/id), `diameter_mm`, `level_name`(생략 시 최근접),
+  `connect_elbows`(기본 true). post-tx: 첫 점 survey 왕복 검증(`verification.match`, 1cm 허용).
+  execute_script CAD→Revit 워크플로의 1층 도구 승격 (AI-First 원칙 §7).
 
 ### Modify (8)
 - `revit_modify_element_parameter` — Set parameter value (1건)

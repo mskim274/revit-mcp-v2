@@ -2,8 +2,9 @@
  * Create Tools — Tools for creating new Revit elements.
  *
  * Tools:
- *   revit_create_wall  — Create a straight wall between two points
- *   revit_create_floor — Create a floor from a rectangle or polygon
+ *   revit_create_wall      — Create a straight wall between two points
+ *   revit_create_floor     — Create a floor from a rectangle or polygon
+ *   revit_create_pipe_run  — Create a connected pipe run (survey coords) + elbows
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -130,6 +131,80 @@ Example (polygon):
         level_name: params.level_name ?? null,
         floor_type: params.floor_type ?? null,
         structural: params.structural ?? false,
+      });
+    }
+  );
+
+  // ─── revit_create_pipe_run ───
+  server.registerTool(
+    "revit_create_pipe_run",
+    {
+      title: "Create Pipe Run (survey coords + elbows)",
+      description: `Create a connected run of pipes through a list of points, with elbow fittings auto-inserted at each vertex. Built for the CAD→Revit workflow: feed survey/spot-elevation coordinates straight from a drawing.
+
+**Project-portable coordinates.** With coordinate_mode="survey" (default), points are shared/survey coordinates. The tool reads THIS document's project location at runtime and converts them — so the same survey points land correctly in ANY project that has Shared Coordinates set up. The rotation sign is auto-detected per project (no hard-coded transform). Switch to coordinate_mode="internal" to pass raw Revit feet.
+
+**Safety:** if the project has no Shared Coordinates (survey origin 0,0,0), survey mode returns an error telling you to set them up or use internal mode. After creation it round-trips the first point back to survey coords and reports verification.match (horizontal error < 1cm).
+
+Examples:
+  - From CAD spot elevations (meters):
+    create_pipe_run(points=[{e:228231.241,n:506653.878,z:130.286},{e:228230.517,n:506654.125,z:130.321}], pipe_type="PIPE_PE", diameter_mm=250)
+  - Internal feet, no elbows:
+    create_pipe_run(points=[{x:0,y:0,z:10},{x:20,y:0,z:10}], coordinate_mode="internal", connect_elbows=false)`,
+      inputSchema: {
+        points: z
+          .array(z.record(z.string(), z.number()))
+          .min(2)
+          .max(500)
+          .describe('Ordered vertices. Survey: [{e,n,z}, ...]. Internal: [{x,y,z}, ...]. Min 2, max 500.'),
+        coordinate_mode: z
+          .enum(["survey", "internal"])
+          .optional()
+          .describe('"survey" (default, shared coords — project-portable) or "internal" (raw Revit feet).'),
+        input_unit: z
+          .enum(["m", "mm"])
+          .optional()
+          .describe('Unit of the input coordinates: "m" (default) or "mm".'),
+        pipe_type: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe('PipeType name (contains match) or ElementId. Default: first available type.'),
+        system_type_id: z
+          .number()
+          .int()
+          .optional()
+          .describe("PipingSystemType ElementId. Default: first found."),
+        diameter_mm: z
+          .number()
+          .positive()
+          .optional()
+          .describe("Pipe diameter in mm (e.g. 250). Default: type default."),
+        level_name: z
+          .string()
+          .optional()
+          .describe("Reference level name. Default: nearest level by average elevation."),
+        connect_elbows: z
+          .boolean()
+          .optional()
+          .describe("Insert elbow fittings at interior vertices (default true)."),
+        idempotency_key: z
+          .string()
+          .optional()
+          .describe("Dedup key for safe retries after a timeout (15min window)."),
+      },
+      annotations: CREATE_ANNOTATIONS,
+    },
+    async (params) => {
+      return sendAndFormat(wsClient, "create_pipe_run", {
+        points: params.points,
+        coordinate_mode: params.coordinate_mode ?? "survey",
+        input_unit: params.input_unit ?? "m",
+        pipe_type: params.pipe_type ?? null,
+        system_type_id: params.system_type_id ?? null,
+        diameter_mm: params.diameter_mm ?? null,
+        level_name: params.level_name ?? null,
+        connect_elbows: params.connect_elbows ?? true,
+        idempotency_key: params.idempotency_key ?? null,
       });
     }
   );
