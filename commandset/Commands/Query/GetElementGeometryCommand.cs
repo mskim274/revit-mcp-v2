@@ -42,8 +42,32 @@ namespace RevitMCP.CommandSet.Commands.Query
             try
             {
                 var detail = GetBool(parameters, "detail", false);
-                var maxFaces = (int)Math.Max(1, Math.Min(500, GetLong(parameters, "max_faces", 50)));
-                var maxEdges = (int)Math.Max(1, Math.Min(2000, GetLong(parameters, "max_edges", 100)));
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "max_faces",
+                        defaultValue: 50,
+                        minValue: 1,
+                        maxValue: 500,
+                        out var maxFaces,
+                        out var maxFacesError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        maxFacesError,
+                        "Pass max_faces as an integer from 1 through 500."));
+                }
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "max_edges",
+                        defaultValue: 100,
+                        minValue: 1,
+                        maxValue: 2000,
+                        out var maxEdges,
+                        out var maxEdgesError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        maxEdgesError,
+                        "Pass max_edges as an integer from 1 through 2000."));
+                }
                 var viewMode = GetString(parameters, "include_geometry_view") ?? "Model";
 
                 // Resolve element IDs: explicit list OR PICKFIRST.
@@ -73,7 +97,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                     {
                         perElement.Add(new Dictionary<string, object>
                         {
-                            ["id"] = id.IntegerValue,
+                            ["id"] = id.GetValue(),
                             ["error"] = "element not found",
                         });
                         continue;
@@ -81,7 +105,7 @@ namespace RevitMCP.CommandSet.Commands.Query
 
                     var entry = new Dictionary<string, object>
                     {
-                        ["id"] = elem.Id.IntegerValue,
+                        ["id"] = elem.Id.GetValue(),
                         ["name"] = elem.Name ?? "",
                         ["category"] = elem.Category?.Name ?? "Unknown",
                     };
@@ -201,29 +225,44 @@ namespace RevitMCP.CommandSet.Commands.Query
         private static List<ElementId> ResolveIds(Dictionary<string, object> parameters)
         {
             var result = new List<ElementId>();
-            if (parameters.TryGetValue("element_ids", out var raw) && raw is List<object> list)
+            if (parameters.TryGetValue("element_ids", out var raw))
             {
+                if (!(raw is List<object> list) || list.Count == 0)
+                    throw new ArgumentException(
+                        "element_ids must be a non-empty array when provided.");
+                if (list.Count > 200)
+                    throw new ArgumentException("element_ids supports at most 200 IDs per call.");
                 foreach (var v in list)
                 {
-                    if (v == null) continue;
-                    int n;
+                    if (v == null)
+                        throw new ArgumentException("element_ids cannot contain null.");
+                    long n;
                     switch (v)
                     {
                         case int i: n = i; break;
-                        case long l: n = (int)l; break;
-                        case double d: n = (int)d; break;
-                        case string s when int.TryParse(s, out var parsed): n = parsed; break;
-                        default: continue;
+                        case long l: n = l; break;
+                        case double d when !double.IsNaN(d)
+                            && !double.IsInfinity(d)
+                            && Math.Abs(d - Math.Truncate(d)) < double.Epsilon:
+                            n = Convert.ToInt64(d);
+                            break;
+                        case string s when long.TryParse(s, out var parsed): n = parsed; break;
+                        default:
+                            throw new ArgumentException(
+                                $"element_ids contains a non-integer value: '{v}'.");
                     }
-                    result.Add(new ElementId(n));
+                    if (n <= 0)
+                        throw new ArgumentException(
+                            $"element_ids contains a non-positive ID: {n}.");
+                    result.Add(ElementIdCompatibility.Create(n));
                 }
             }
-            if (result.Count == 0)
+            else
             {
                 foreach (var id in SelectionContext.Current ?? Array.Empty<ElementId>())
                     result.Add(id);
             }
-            return result;
+            return result.GroupBy(id => id.GetValue()).Select(group => group.First()).ToList();
         }
 
         private static void FlattenSolids(GeometryElement geom, List<Solid> output)
@@ -296,17 +335,50 @@ namespace RevitMCP.CommandSet.Commands.Query
         private static string GetString(Dictionary<string, object> p, string key)
             => p.TryGetValue(key, out var v) && v is string s ? s : null;
 
-        private static long GetLong(Dictionary<string, object> p, string key, long def)
+        private static bool TryGetBoundedInt(
+            Dictionary<string, object> p,
+            string key,
+            int defaultValue,
+            int minValue,
+            int maxValue,
+            out int value,
+            out string error)
         {
-            if (!p.TryGetValue(key, out var v) || v == null) return def;
-            return v switch
+            value = defaultValue;
+            error = null;
+            if (!p.TryGetValue(key, out var raw))
+                return true;
+
+            long parsed;
+            switch (raw)
             {
-                long l => l,
-                int i => i,
-                double d => (long)d,
-                string s when long.TryParse(s, out var sl) => sl,
-                _ => def,
-            };
+                case int i:
+                    parsed = i;
+                    break;
+                case long l:
+                    parsed = l;
+                    break;
+                case double d when !double.IsNaN(d) &&
+                                   !double.IsInfinity(d) &&
+                                   d == Math.Truncate(d) &&
+                                   d >= long.MinValue &&
+                                   d <= long.MaxValue:
+                    parsed = (long)d;
+                    break;
+                default:
+                    error = $"{key} must be an integer from {minValue} through {maxValue}.";
+                    return false;
+            }
+
+            if (parsed < minValue || parsed > maxValue)
+            {
+                error =
+                    $"{key} must be from {minValue} through {maxValue}; received {parsed}.";
+                return false;
+            }
+
+            value = (int)parsed;
+            return true;
         }
 
         private static bool GetBool(Dictionary<string, object> p, string key, bool defaultValue)

@@ -53,11 +53,61 @@ namespace AutoCADMCP.CommandSet.Commands
         {
             try
             {
-                var scope = (GetString(parameters, "scope") ?? "selection").ToLowerInvariant();
-                var layerFilter = GetString(parameters, "layer");
-                var toleranceOverride = GetDouble(parameters, "tolerance", 0);
+                var rawScope = GetString(parameters, "scope");
+                if (parameters.TryGetValue("scope", out var scopeValue) &&
+                    scopeValue != null &&
+                    rawScope == null)
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        "scope must be a string when supplied.",
+                        "Use scope=\"selection\", \"layer\", or \"all\"."));
+                }
+                var scope = (rawScope ?? "selection").Trim().ToLowerInvariant();
+                if (scope != "selection" && scope != "layer" && scope != "all")
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Unsupported scope '{rawScope}'.",
+                        "Use scope=\"selection\", \"layer\", or \"all\"."));
+                }
+
+                var layerFilter = GetString(parameters, "layer")?.Trim();
+                if (scope == "layer" && string.IsNullOrWhiteSpace(layerFilter))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        "layer is required when scope='layer'.",
+                        "Provide a non-empty AutoCAD layer name, or use scope='selection'/'all'."));
+                }
+
+                if (!TryGetOptionalFiniteDouble(
+                        parameters,
+                        "tolerance",
+                        out var hasTolerance,
+                        out var toleranceOverride))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        "tolerance must be a finite number when supplied.",
+                        "Provide a positive tolerance in drawing units, or omit it for automatic detection."));
+                }
+                if (hasTolerance && toleranceOverride <= 0)
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        "tolerance must be greater than 0 when supplied.",
+                        "Provide a positive tolerance in drawing units, or omit it for automatic detection."));
+                }
                 var headerTokens = GetStringArray(parameters, "header_tokens") ?? DefaultHeaderTokens;
-                var maxPreviewRows = (int)Math.Max(1, Math.Min(20, GetLong(parameters, "preview_rows", 8)));
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "preview_rows",
+                        defaultValue: 8,
+                        minValue: 1,
+                        maxValue: 20,
+                        out var maxPreviewRows,
+                        out var previewRowsError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        previewRowsError,
+                        "Pass preview_rows as an integer from 1 through 20."));
+                }
 
                 // ── 1. Collect entities ──────────────────────────────────
                 var lines = new List<LineSeg>();
@@ -463,30 +513,82 @@ namespace AutoCADMCP.CommandSet.Commands
         private static string GetString(Dictionary<string, object> p, string key)
             => p.TryGetValue(key, out var v) && v is string s ? s : null;
 
-        private static long GetLong(Dictionary<string, object> p, string key, long def)
+        private static bool TryGetBoundedInt(
+            Dictionary<string, object> p,
+            string key,
+            int defaultValue,
+            int minValue,
+            int maxValue,
+            out int value,
+            out string error)
         {
-            if (!p.TryGetValue(key, out var v) || v == null) return def;
-            return v switch
+            value = defaultValue;
+            error = null;
+            if (!p.TryGetValue(key, out var raw))
+                return true;
+
+            long parsed;
+            switch (raw)
             {
-                long l => l,
-                int i => i,
-                double d => (long)d,
-                string s when long.TryParse(s, out var sl) => sl,
-                _ => def,
-            };
+                case int i:
+                    parsed = i;
+                    break;
+                case long l:
+                    parsed = l;
+                    break;
+                case double d when !double.IsNaN(d) &&
+                                   !double.IsInfinity(d) &&
+                                   d == Math.Truncate(d) &&
+                                   d >= long.MinValue &&
+                                   d <= long.MaxValue:
+                    parsed = (long)d;
+                    break;
+                default:
+                    error = $"{key} must be an integer from {minValue} through {maxValue}.";
+                    return false;
+            }
+
+            if (parsed < minValue || parsed > maxValue)
+            {
+                error =
+                    $"{key} must be from {minValue} through {maxValue}; received {parsed}.";
+                return false;
+            }
+
+            value = (int)parsed;
+            return true;
         }
 
-        private static double GetDouble(Dictionary<string, object> p, string key, double def)
+        private static bool TryGetOptionalFiniteDouble(
+            Dictionary<string, object> parameters,
+            string key,
+            out bool supplied,
+            out double value)
         {
-            if (!p.TryGetValue(key, out var v) || v == null) return def;
-            return v switch
+            supplied = false;
+            value = 0;
+            if (!parameters.TryGetValue(key, out var raw))
+                return true;
+
+            supplied = true;
+            if (raw == null)
+                return false;
+            switch (raw)
             {
-                double d => d,
-                long l => l,
-                int i => i,
-                string s when double.TryParse(s, out var sd) => sd,
-                _ => def,
-            };
+                case double doubleValue:
+                    value = doubleValue;
+                    break;
+                case long longValue:
+                    value = longValue;
+                    break;
+                case int intValue:
+                    value = intValue;
+                    break;
+                default:
+                    return false;
+            }
+
+            return !double.IsNaN(value) && !double.IsInfinity(value);
         }
 
         private static string[] GetStringArray(Dictionary<string, object> p, string key)

@@ -38,18 +38,30 @@ namespace RevitMCP.CommandSet.Commands.View
                     return Task.FromResult(CommandResult.Fail(
                         "No valid element IDs provided.",
                         "Use revit_query_elements to find element IDs."));
+                if (elementIds.Count > 500)
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Too many element IDs: {elementIds.Count} (max 500).",
+                        "Split the operation into smaller calls or use a narrower query."));
 
                 // Get mode
                 var mode = "isolate";
                 if (parameters.TryGetValue("mode", out var modeObj) && modeObj != null)
-                    mode = modeObj.ToString().ToLower();
+                    mode = modeObj.ToString().ToLowerInvariant();
+                if (mode != "isolate" && mode != "hide")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Invalid mode '{mode}'.",
+                        "Use mode=\"isolate\" or mode=\"hide\"."));
 
                 // Resolve view
                 global::Autodesk.Revit.DB.View view = null;
                 if (parameters.TryGetValue("view_id", out var vidObj) && vidObj != null)
                 {
-                    var viewId = Convert.ToInt32(vidObj);
-                    view = doc.GetElement(new ElementId(viewId)) as global::Autodesk.Revit.DB.View;
+                    var viewId = Convert.ToInt64(vidObj);
+                    view = doc.GetElement(ElementIdCompatibility.Create(viewId)) as global::Autodesk.Revit.DB.View;
+                    if (view == null)
+                        return Task.FromResult(CommandResult.Fail(
+                            $"view_id {viewId} is not a valid view.",
+                            "Use revit_get_views to choose a non-template graphical view."));
                 }
 
                 // Use active view if not specified
@@ -68,12 +80,15 @@ namespace RevitMCP.CommandSet.Commands.View
 
                 // Validate elements exist
                 var validIds = new List<ElementId>();
+                var invalidIds = new List<long>();
                 foreach (var id in elementIds)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var elem = doc.GetElement(new ElementId(id));
+                    var elem = doc.GetElement(ElementIdCompatibility.Create(id));
                     if (elem != null)
-                        validIds.Add(new ElementId(id));
+                        validIds.Add(ElementIdCompatibility.Create(id));
+                    else
+                        invalidIds.Add(id);
                 }
 
                 if (validIds.Count == 0)
@@ -81,39 +96,19 @@ namespace RevitMCP.CommandSet.Commands.View
                         "None of the provided element IDs are valid.",
                         "Use revit_query_elements to find valid element IDs."));
 
-                // Execute isolation/hiding
-                if (mode == "hide")
-                {
-                    using (var tx = new Transaction(doc, $"MCP: Hide {validIds.Count} elements"))
-                    {
-                        tx.Start();
-                        view.HideElements(validIds);
-                        tx.Commit();
-                    }
-                }
-                else
-                {
-                    // Return action for plugin layer to handle via UIDocument selection + isolate
-                    return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
-                    {
-                        ["action"] = "isolate_in_view",
-                        ["mode"] = mode,
-                        ["element_count"] = validIds.Count,
-                        ["element_ids"] = validIds.Select(id => id.IntegerValue).ToList(),
-                        ["view_name"] = view.Name,
-                        ["view_id"] = view.Id.IntegerValue
-                    }));
-                }
-
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
+                    ["action"] = "temporary_hide_isolate",
                     ["mode"] = mode,
+                    ["requested_count"] = elementIds.Count,
+                    ["valid_count"] = validIds.Count,
+                    ["invalid_ids"] = invalidIds,
                     ["element_count"] = validIds.Count,
+                    ["element_ids"] = validIds.Select(id => id.GetValue()).ToList(),
                     ["view_name"] = view.Name,
-                    ["view_id"] = view.Id.IntegerValue,
-                    ["note"] = mode == "isolate"
-                        ? "Elements are now isolated. Use reset_view_isolation to restore."
-                        : "Elements are now hidden. Use reset_view_isolation to restore."
+                    ["view_id"] = view.Id.GetValue(),
+                    ["temporary"] = true,
+                    ["note"] = "The plugin will apply temporary hide/isolate to this exact view. Use reset_view_isolation to restore."
                 }));
             }
             catch (OperationCanceledException)
@@ -129,30 +124,36 @@ namespace RevitMCP.CommandSet.Commands.View
             }
         }
 
-        private List<int> ParseElementIds(object idsObj)
+        private List<long> ParseElementIds(object idsObj)
         {
-            var result = new List<int>();
+            var result = new List<long>();
             if (idsObj is IEnumerable<object> enumerable)
             {
                 foreach (var item in enumerable)
                 {
-                    if (item != null && int.TryParse(item.ToString(), out var id))
-                        result.Add(id);
+                    if (item == null || !long.TryParse(item.ToString(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{item}'.");
+                    result.Add(id);
                 }
             }
             else if (idsObj is string str)
             {
                 foreach (var part in str.Split(','))
                 {
-                    if (int.TryParse(part.Trim(), out var id))
-                        result.Add(id);
+                    if (!long.TryParse(part.Trim(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{part}'.");
+                    result.Add(id);
                 }
             }
-            else if (int.TryParse(idsObj?.ToString(), out var singleId))
+            else if (long.TryParse(idsObj?.ToString(), out var singleId) && singleId > 0)
             {
                 result.Add(singleId);
             }
-            return result;
+            else
+            {
+                throw new ArgumentException("element_ids must contain positive integer element IDs.");
+            }
+            return result.Distinct().ToList();
         }
     }
 }

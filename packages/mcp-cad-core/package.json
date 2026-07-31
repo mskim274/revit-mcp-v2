@@ -1,7 +1,7 @@
 {
   "name": "@kimminsub/mcp-cad-core",
   "version": "0.1.0",
-  "description": "Shared MCP↔WebSocket↔CAD-plugin core (WebSocket client, overflow-protected response formatter, pagination helpers, protocol types). Used by Revit MCP and the upcoming AutoCAD MCP.",
+  "description": "Shared MCP↔WebSocket↔CAD-plugin core (WebSocket client, overflow-protected response formatter, pagination helpers, protocol types). Used by the Revit and AutoCAD MCP servers.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,10 +13,11 @@
     "./types": "./dist/types.js",
     "./constants": "./dist/constants.js"
   },
-  "files": ["dist/", "README.md"],
+  "files": ["dist/", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
   },
   "keywords": ["mcp", "model-context-protocol", "cad", "revit", "autocad", "websocket"],
   "author": "mskim274",
@@ -28,17 +29,16 @@
     "directory": "packages/mcp-cad-core"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "dependencies": {
-    "ws": "^8.18.0",
-    "uuid": "^11.1.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.0",
-    "@types/uuid": "^10.0.0",
-    "typescript": "^5.7.0"
+    "@types/node": "^22.20.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=20.0.0"

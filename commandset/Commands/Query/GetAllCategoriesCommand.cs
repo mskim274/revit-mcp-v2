@@ -32,7 +32,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                     && Convert.ToBoolean(ie);
 
                 // Single-pass: count all instances grouped by category
-                var instanceCounts = new Dictionary<int, int>();
+                var instanceCounts = new Dictionary<long, int>();
                 var allInstances = new FilteredElementCollector(doc)
                     .WhereElementIsNotElementType();
 
@@ -40,7 +40,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (elem.Category == null) continue;
-                    var catId = elem.Category.Id.IntegerValue;
+                    var catId = elem.Category.Id.GetValue();
                     instanceCounts[catId] = instanceCounts.TryGetValue(catId, out var c) ? c + 1 : 1;
                 }
 
@@ -53,7 +53,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                     if (cat == null || cat.Id == null) continue;
                     if (cat.CategoryType != CategoryType.Model) continue;
 
-                    var catIdInt = cat.Id.IntegerValue;
+                    var catIdInt = cat.Id.GetValue();
                     instanceCounts.TryGetValue(catIdInt, out var count);
 
                     if (!includeEmpty && count == 0) continue;
@@ -61,7 +61,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                     result.Add(new Dictionary<string, object>
                     {
                         ["name"] = cat.Name,
-                        ["built_in_category"] = ((BuiltInCategory)catIdInt).ToString(),
+                        ["built_in_category"] = ((BuiltInCategory)(int)catIdInt).ToString(),
                         ["instance_count"] = count
                     });
                 }

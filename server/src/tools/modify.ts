@@ -14,8 +14,15 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { BATCH_TIMEOUT_MS } from "@kimminsub/mcp-cad-core";
 import type { RevitWebSocketClient } from "../services/websocket-client.js";
 import { sendAndFormat } from "../services/response-formatter.js";
+import {
+  elementIdSchema,
+  idempotencyKeySchema,
+  VALUE_MODE_OVERRIDE_SCHEMA,
+  VALUE_MODE_SCHEMA,
+} from "./shared.js";
 
 // Shared annotations for modification tools
 const MODIFY_ANNOTATIONS = {
@@ -31,6 +38,89 @@ const DESTRUCTIVE_ANNOTATIONS = {
   idempotentHint: false,
   openWorldHint: false,
 } as const;
+
+const PARAMETER_VALUE_SCHEMA = z.union([
+  z.string(),
+  z.number().finite(),
+  z.boolean(),
+]);
+
+const BATCH_MODIFICATION_SCHEMA = z
+  .object({
+    element_id: elementIdSchema("Element ID"),
+    parameter_name: z.string().trim().min(1).describe("Parameter name"),
+    value: PARAMETER_VALUE_SCHEMA.describe("New value"),
+    is_type_param: z
+      .boolean()
+      .optional()
+      .describe("Set on the element's type instead (default false)"),
+    value_mode: VALUE_MODE_OVERRIDE_SCHEMA.describe(
+      "Optional per-item override. If omitted, the top-level value_mode applies."
+    ),
+  })
+  .strict();
+
+const BATCH_MODIFY_INPUT_SCHEMA = z
+  .object({
+    modifications: z
+      .array(BATCH_MODIFICATION_SCHEMA)
+      .min(1)
+      .max(5000)
+      .optional()
+      .describe("Shape A: explicit per-element modifications (max 5000)"),
+    element_ids: z
+      .array(elementIdSchema("Element ID"))
+      .min(1)
+      .max(5000)
+      .optional()
+      .describe("Shape B: element IDs to stamp (combine with 'parameters')"),
+    parameters: z
+      .record(z.string().trim().min(1), PARAMETER_VALUE_SCHEMA)
+      .refine((value) => Object.keys(value).length > 0, {
+        message: "parameters must contain at least one name/value pair",
+      })
+      .optional()
+      .describe(
+        'Shape B: name/value map applied to every element, e.g. {"Comments": "Reviewed"}'
+      ),
+    value_mode: VALUE_MODE_SCHEMA,
+    only_if_empty: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Only set parameters that currently have no value (never overwrite)"),
+    idempotency_key: idempotencyKeySchema(),
+  })
+  .superRefine((value, ctx) => {
+    const hasA = value.modifications !== undefined;
+    const hasIds = value.element_ids !== undefined;
+    const hasParameters = value.parameters !== undefined;
+
+    if (hasA && (hasIds || hasParameters)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Use exactly one batch shape: modifications OR element_ids + parameters.",
+      });
+    } else if (!hasA && !(hasIds && hasParameters)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Provide modifications, or provide both element_ids and parameters.",
+      });
+    }
+
+    if (hasIds && hasParameters) {
+      const totalSets =
+        value.element_ids!.length * Object.keys(value.parameters!).length;
+      if (totalSets > 5000) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Shape B expands to ${totalSets} parameter sets; maximum is 5000.`,
+        });
+      }
+    }
+  });
 
 export function registerModifyTools(
   server: McpServer,
@@ -52,14 +142,20 @@ Examples:
   - Set comments: modify_element_parameter(element_id=12345, parameter_name="Comments", value="Updated by MCP")
   - Set type param: modify_element_parameter(element_id=12345, parameter_name="Width", value=0.5, is_type_param=true)`,
       inputSchema: {
-        element_id: z.number().describe("The Revit element ID to modify"),
-        parameter_name: z.string().describe("Name of the parameter to set"),
-        value: z.union([z.string(), z.number(), z.boolean()]).describe("New value for the parameter"),
+        element_id: elementIdSchema("The Revit element ID to modify"),
+        parameter_name: z
+          .string()
+          .trim()
+          .min(1)
+          .describe("Name of the parameter to set"),
+        value: PARAMETER_VALUE_SCHEMA.describe("New value for the parameter"),
+        value_mode: VALUE_MODE_SCHEMA,
         is_type_param: z
           .boolean()
           .optional()
           .default(false)
           .describe("Set on the element's type instead of instance (default: false)"),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: MODIFY_ANNOTATIONS,
     },
@@ -68,7 +164,9 @@ Examples:
         element_id: params.element_id,
         parameter_name: params.parameter_name,
         value: params.value,
+        value_mode: params.value_mode ?? "internal",
         is_type_param: params.is_type_param ?? false,
+        idempotency_key: params.idempotency_key,
       });
     }
   );
@@ -87,15 +185,24 @@ Maximum 100 elements per call. The response shows both directly deleted elements
 Use revit_query_elements or revit_get_element_info to verify element IDs before deleting.`,
       inputSchema: {
         element_ids: z
-          .array(z.number())
+          .array(elementIdSchema("Element ID"))
+          .min(1)
+          .max(100)
           .describe("Array of element IDs to delete (max 100)"),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: DESTRUCTIVE_ANNOTATIONS,
     },
     async (params) => {
-      return sendAndFormat(wsClient, "delete_elements", {
-        element_ids: params.element_ids,
-      });
+      return sendAndFormat(
+        wsClient,
+        "delete_elements",
+        {
+          element_ids: params.element_ids,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      );
     }
   );
 
@@ -116,25 +223,35 @@ Maximum 500 elements per call. Use revit_get_element_info to check current posit
 Example: Move a wall 10 feet in X → move_elements(element_ids=[12345], dx=10, dy=0)`,
       inputSchema: {
         element_ids: z
-          .array(z.number())
+          .array(elementIdSchema("Element ID"))
+          .min(1)
+          .max(500)
           .describe("Array of element IDs to move"),
-        dx: z.number().describe("Translation in X direction (feet)"),
-        dy: z.number().describe("Translation in Y direction (feet)"),
+        dx: z.number().finite().describe("Translation in X direction (feet)"),
+        dy: z.number().finite().describe("Translation in Y direction (feet)"),
         dz: z
           .number()
+          .finite()
           .optional()
           .default(0)
           .describe("Translation in Z direction (feet, default: 0)"),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: MODIFY_ANNOTATIONS,
     },
     async (params) => {
-      return sendAndFormat(wsClient, "move_elements", {
-        element_ids: params.element_ids,
-        dx: params.dx,
-        dy: params.dy,
-        dz: params.dz ?? 0,
-      });
+      return sendAndFormat(
+        wsClient,
+        "move_elements",
+        {
+          element_ids: params.element_ids,
+          dx: params.dx,
+          dy: params.dy,
+          dz: params.dz ?? 0,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      );
     }
   );
 
@@ -152,25 +269,35 @@ All distances are in feet. Maximum 100 elements per call.
 Example: Copy a column 20 feet east → copy_elements(element_ids=[56789], dx=20, dy=0)`,
       inputSchema: {
         element_ids: z
-          .array(z.number())
+          .array(elementIdSchema("Element ID"))
+          .min(1)
+          .max(100)
           .describe("Array of element IDs to copy (max 100)"),
-        dx: z.number().describe("Translation in X direction (feet)"),
-        dy: z.number().describe("Translation in Y direction (feet)"),
+        dx: z.number().finite().describe("Translation in X direction (feet)"),
+        dy: z.number().finite().describe("Translation in Y direction (feet)"),
         dz: z
           .number()
+          .finite()
           .optional()
           .default(0)
           .describe("Translation in Z direction (feet, default: 0)"),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: MODIFY_ANNOTATIONS,
     },
     async (params) => {
-      return sendAndFormat(wsClient, "copy_elements", {
-        element_ids: params.element_ids,
-        dx: params.dx,
-        dy: params.dy,
-        dz: params.dz ?? 0,
-      });
+      return sendAndFormat(
+        wsClient,
+        "copy_elements",
+        {
+          element_ids: params.element_ids,
+          dx: params.dx,
+          dy: params.dy,
+          dz: params.dz ?? 0,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      );
     }
   );
 
@@ -191,16 +318,19 @@ Common workflow:
   3. revit_modify_element_parameter(element_id=<new>, parameter_name="b", value=600, is_type_param=true) → tweak dimensions
   4. revit_change_instance_type(instance_ids=[...], new_type_id=<new>) → reassign existing beams`,
       inputSchema: {
-        source_type_id: z.number().int()
-          .describe("ElementId of the existing type to copy from."),
-        new_name: z.string().min(1)
+        source_type_id: elementIdSchema(
+          "ElementId of the existing type to copy from"
+        ),
+        new_name: z.string().trim().min(1)
           .describe("Unique name for the new duplicated type. Avoid : { } | \\ / < > ? * etc."),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: MODIFY_ANNOTATIONS,
     },
     async (params) => sendAndFormat(wsClient, "duplicate_type", {
       source_type_id: params.source_type_id,
       new_name: params.new_name,
+      idempotency_key: params.idempotency_key,
     })
   );
 
@@ -209,20 +339,21 @@ Common workflow:
     "revit_rename_type",
     {
       title: "Rename Element Type",
-      description: `Rename an existing Revit ElementType. Useful when CAD schedule type names change (e.g. floor range "B1F-4F" → "B1F-3F" because a new schedule splits the original range).
+      description: `Rename an existing Revit ElementType. Useful when a schedule splits an existing range (for example, "Levels 1-4" → "Levels 1-3").
 
 The new name must be unique within the family/category. The change propagates to all instances using this type — they keep using it under the new name.`,
       inputSchema: {
-        type_id: z.number().int()
-          .describe("ElementId of the type to rename."),
-        new_name: z.string().min(1)
+        type_id: elementIdSchema("ElementId of the type to rename"),
+        new_name: z.string().trim().min(1)
           .describe("New unique name. Idempotent: if equal to current name, no-op."),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: MODIFY_ANNOTATIONS,
     },
     async (params) => sendAndFormat(wsClient, "rename_type", {
       type_id: params.type_id,
       new_name: params.new_name,
+      idempotency_key: params.idempotency_key,
     })
   );
 
@@ -235,9 +366,9 @@ The new name must be unique within the family/category. The change propagates to
 
 Use this AFTER revit_duplicate_type when you need to migrate some instances of a beam/wall type to a newly-created variant. Typical CAD-→-Revit reconciliation flow:
 
-  - Old Revit type: "ACG2, B1F-4F" (50 instances spanning floors B1F~4F)
-  - New schedule splits to: "ACG2, B1F-3F" + "ACG2, 4F"
-  - Read each instance's SK_FL parameter, group by target type, then call this with the IDs to reassign.
+  - Old Revit type: "Beam Type, Levels 1-4" (instances spanning four levels)
+  - New schedule splits to: "Beam Type, Levels 1-3" + "Beam Type, Level 4"
+  - Read each instance's project-specific grouping parameter, group by target type, then call this with the IDs to reassign.
 
 Limits:
   - Max 1000 instances per call (batch larger sets in chunks).
@@ -245,18 +376,25 @@ Limits:
   - If ALL changes fail, the transaction is rolled back.`,
       inputSchema: {
         instance_ids: z.union([
-          z.number().int(),
-          z.array(z.number().int()).min(1).max(1000),
+          elementIdSchema("Instance ElementId"),
+          z.array(elementIdSchema("Instance ElementId")).min(1).max(1000),
         ]).describe("Single instance ID or array of IDs (max 1000)."),
-        new_type_id: z.number().int()
-          .describe("ElementId of the target ElementType."),
+        new_type_id: elementIdSchema("ElementId of the target ElementType"),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: MODIFY_ANNOTATIONS,
     },
-    async (params) => sendAndFormat(wsClient, "change_instance_type", {
-      instance_ids: params.instance_ids,
-      new_type_id: params.new_type_id,
-    })
+    async (params) =>
+      sendAndFormat(
+        wsClient,
+        "change_instance_type",
+        {
+          instance_ids: params.instance_ids,
+          new_type_id: params.new_type_id,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      )
   );
 
   // ─── revit_batch_modify_parameters ───
@@ -264,66 +402,36 @@ Limits:
     "revit_batch_modify_parameters",
     {
       title: "Batch Modify Parameters",
-      description: `Set parameter values on MANY elements in a single transaction. Replaces hundreds of individual revit_modify_element_parameter calls (570 calls → 1 call).
+      description: `Set parameter values on MANY elements in a single transaction. Replaces hundreds of individual revit_modify_element_parameter calls with one batch.
 
 Two input shapes — use exactly one:
   A) modifications: fine-grained list, one entry per set. Use when values differ per element.
-     [{element_id: 123, parameter_name: "SK_SIZE", value: "D600"}, {element_id: 456, parameter_name: "SK_SIZE", value: "D450"}]
+     [{element_id: 123, parameter_name: "Comments", value: "Reviewed"}, {element_id: 456, parameter_name: "Comments", value: "Needs review"}]
   B) element_ids + parameters: applies every name→value pair to every element. Use for uniform stamping.
-     element_ids=[1,2,3], parameters={"SK_SIZE": "250A", "SK_RM": "COM", "SK_UTIL": "DRAINAGE WORK"}
+     element_ids=[1,2,3], parameters={"Comments": "Reviewed", "Mark": "QA-01"}
 
 **only_if_empty=true** — "fill the blanks" mode: parameters that already have a value are skipped (reported as skipped_not_empty), never overwritten. Perfect for stamping standard values without clobbering intentional overrides.
 
 Partial success: failed items are reported individually (element not found, read-only, type mismatch); successful sets commit together. Max 5000 sets per call.
 
 Pass idempotency_key when retrying after a timeout to avoid double-application.`,
-      inputSchema: {
-        modifications: z
-          .array(
-            z.object({
-              element_id: z.number().int().describe("Element ID"),
-              parameter_name: z.string().describe("Parameter name"),
-              value: z
-                .union([z.string(), z.number(), z.boolean()])
-                .describe("New value"),
-              is_type_param: z
-                .boolean()
-                .optional()
-                .describe("Set on the element's type instead (default false)"),
-            })
-          )
-          .max(5000)
-          .optional()
-          .describe("Shape A: explicit per-element modifications (max 5000)"),
-        element_ids: z
-          .array(z.number().int())
-          .max(5000)
-          .optional()
-          .describe("Shape B: element IDs to stamp (combine with 'parameters')"),
-        parameters: z
-          .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
-          .optional()
-          .describe('Shape B: name→value map applied to every element, e.g. {"SK_SIZE": "250A"}'),
-        only_if_empty: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe("Only set parameters that currently have no value (never overwrite)"),
-        idempotency_key: z
-          .string()
-          .optional()
-          .describe("Dedup key for safe retries after timeouts (15min window)"),
-      },
+      inputSchema: BATCH_MODIFY_INPUT_SCHEMA,
       annotations: MODIFY_ANNOTATIONS,
     },
     async (params) => {
-      return sendAndFormat(wsClient, "batch_modify_parameters", {
-        modifications: params.modifications ?? null,
-        element_ids: params.element_ids ?? null,
-        parameters: params.parameters ?? null,
-        only_if_empty: params.only_if_empty ?? false,
-        idempotency_key: params.idempotency_key ?? null,
-      });
+      return sendAndFormat(
+        wsClient,
+        "batch_modify_parameters",
+        {
+          modifications: params.modifications ?? null,
+          element_ids: params.element_ids ?? null,
+          parameters: params.parameters ?? null,
+          value_mode: params.value_mode ?? "internal",
+          only_if_empty: params.only_if_empty ?? false,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      );
     }
   );
 }

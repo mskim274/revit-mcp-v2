@@ -24,7 +24,7 @@ namespace RevitMCP.CommandSet.Helpers
     /// </summary>
     public class ElementSelectorOptions
     {
-        public List<int> ElementIds { get; set; }
+        public List<long> ElementIds { get; set; }
         public string Category { get; set; }
         public string TypeNameContains { get; set; }
         public string TypeNameStartsWith { get; set; }
@@ -48,17 +48,50 @@ namespace RevitMCP.CommandSet.Helpers
     {
         public static ElementSelectorResult Resolve(Document doc, ElementSelectorOptions opts)
         {
+            if (doc == null) throw new ArgumentNullException(nameof(doc));
+            if (opts == null) throw new ArgumentNullException(nameof(opts));
+            if (opts.MaxCount < 1)
+                throw new ArgumentException("max_count must be at least 1.");
+
+            if (opts.ElementIds != null && opts.ElementIds.Count == 0)
+                throw new ArgumentException(
+                    "element_ids was provided but is empty. Provide at least one ID or omit it and use a filter.");
+
+            var hasParameterName = !string.IsNullOrWhiteSpace(opts.ParameterName);
+            var hasParameterValue = !string.IsNullOrWhiteSpace(opts.ParameterValueContains);
+            if (hasParameterName != hasParameterValue)
+                throw new ArgumentException(
+                    "parameter_name and parameter_value_contains must be provided together.");
+
+            var hasMeaningfulFilter =
+                opts.ElementIds != null && opts.ElementIds.Count > 0
+                || !string.IsNullOrWhiteSpace(opts.Category)
+                || !string.IsNullOrWhiteSpace(opts.TypeNameContains)
+                || !string.IsNullOrWhiteSpace(opts.TypeNameStartsWith)
+                || !string.IsNullOrWhiteSpace(opts.MarkContains)
+                || hasParameterName
+                || !string.IsNullOrWhiteSpace(opts.LevelName);
+            if (!hasMeaningfulFilter)
+                throw new ArgumentException(
+                    "At least one non-empty selector is required; view_id alone is not a safe selector.");
+
             var result = new ElementSelectorResult();
 
             // ─── 1) Direct ID path (priority) ───
             if (opts.ElementIds != null && opts.ElementIds.Count > 0)
             {
-                foreach (var id in opts.ElementIds)
+                var distinctIds = opts.ElementIds.Distinct().ToList();
+                result.TotalCandidatesBeforeFilter = distinctIds.Count;
+                if (distinctIds.Count > opts.MaxCount)
                 {
-                    var elem = doc.GetElement(new ElementId(id));
+                    result.TruncatedToMaxCount = true;
+                    distinctIds = distinctIds.Take(opts.MaxCount).ToList();
+                }
+                foreach (var id in distinctIds)
+                {
+                    var elem = doc.GetElement(ElementIdCompatibility.Create(id));
                     if (elem != null) result.Elements.Add(elem);
                 }
-                result.TotalCandidatesBeforeFilter = result.Elements.Count;
                 result.AppliedFilters.Add($"element_ids ({opts.ElementIds.Count})");
                 return result;
             }
@@ -68,7 +101,7 @@ namespace RevitMCP.CommandSet.Helpers
             if (opts.ViewId != null && opts.ViewId != ElementId.InvalidElementId)
             {
                 collector = new FilteredElementCollector(doc, opts.ViewId);
-                result.AppliedFilters.Add($"view_id={opts.ViewId.IntegerValue}");
+                result.AppliedFilters.Add($"view_id={opts.ViewId.GetValue()}");
             }
             else
             {
@@ -224,7 +257,7 @@ namespace RevitMCP.CommandSet.Helpers
                 case StorageType.String: return p.AsString();
                 case StorageType.Integer: return p.AsInteger().ToString();
                 case StorageType.Double: return p.AsDouble().ToString("F4");
-                case StorageType.ElementId: return p.AsElementId().IntegerValue.ToString();
+                case StorageType.ElementId: return p.AsElementId().GetValue().ToString();
                 default: return null;
             }
         }

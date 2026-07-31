@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,6 +50,7 @@ namespace RevitMCP.CommandSet.Commands.Export
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                parameters = parameters ?? new Dictionary<string, object>();
 
                 // ─── Resolve schedule view ───
                 var schedule = ResolveSchedule(doc, parameters, out var failReason);
@@ -63,6 +65,45 @@ namespace RevitMCP.CommandSet.Commands.Export
                 }
 
                 // ─── Read table data ───
+                var format = (parameters.TryGetValue("format", out var fObj)
+                    ? fObj?.ToString()
+                    : null)?.ToLowerInvariant() ?? "json";
+                if (format != "json" && format != "csv" && format != "both")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Invalid format '{format}'.",
+                        "Use format=\"json\", \"csv\", or \"both\"."));
+
+                var includeData = !parameters.TryGetValue("include_data", out var includeDataObj)
+                    || includeDataObj == null
+                    || Convert.ToBoolean(includeDataObj);
+                var overwrite = parameters.TryGetValue("overwrite", out var overwriteObj)
+                    && overwriteObj != null
+                    && Convert.ToBoolean(overwriteObj);
+                var maxRows = parameters.TryGetValue("max_rows", out var maxRowsObj)
+                    && maxRowsObj != null
+                    ? Convert.ToInt32(maxRowsObj)
+                    : 50000;
+                if (maxRows < 1 || maxRows > 200000)
+                    return Task.FromResult(CommandResult.Fail(
+                        $"max_rows must be between 1 and 200000, got {maxRows}.",
+                        "Use a smaller positive max_rows or export a narrower schedule."));
+
+                var outputDir = parameters.TryGetValue("output_dir", out var outputDirObj)
+                    ? outputDirObj?.ToString()
+                    : null;
+                if (string.IsNullOrWhiteSpace(outputDir))
+                    outputDir = Path.Combine(Path.GetTempPath(), "revit-mcp-exports");
+                outputDir = Path.GetFullPath(outputDir);
+
+                var encoding = (parameters.TryGetValue("csv_encoding", out var encodingObj)
+                    ? encodingObj?.ToString()
+                    : null)?.ToLowerInvariant() ?? "utf8-bom";
+                if (encoding != "utf8" && encoding != "utf8-bom")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Invalid csv_encoding '{encoding}'.",
+                        "Use csv_encoding=\"utf8-bom\" or \"utf8\"."));
+                bool withBom = encoding == "utf8-bom";
+
                 var table = schedule.GetTableData();
                 var bodySection = table.GetSectionData(SectionType.Body);
                 var headerSection = table.GetSectionData(SectionType.Header);
@@ -80,6 +121,10 @@ namespace RevitMCP.CommandSet.Commands.Export
                 int lastBodyRow = bodySection.LastRowNumber;
                 int colCount = lastCol - firstCol + 1;
                 int bodyRowCount = lastBodyRow - firstBodyRow + 1;
+                if (bodyRowCount > maxRows)
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Schedule contains {bodyRowCount} body rows, exceeding max_rows={maxRows}.",
+                        "Increase max_rows up to 200000 only if the response/file size is acceptable, or export a filtered schedule."));
 
                 // Headers come from the header section. Different schedules put labels
                 // on different header rows (multi-row headers exist). We take the last
@@ -114,23 +159,6 @@ namespace RevitMCP.CommandSet.Commands.Export
                     rows.Add(row);
                 }
 
-                // ─── Options ───
-                var format = (parameters.TryGetValue("format", out var fObj) ? fObj?.ToString() : null)?.ToLowerInvariant() ?? "json";
-                if (format != "json" && format != "csv" && format != "both")
-                    format = "json";
-
-                var includeData = !parameters.TryGetValue("include_data", out var idObj)
-                    || idObj == null
-                    || Convert.ToBoolean(idObj);
-
-                var outputDir = parameters.TryGetValue("output_dir", out var odObj)
-                    ? odObj?.ToString() : null;
-                if (string.IsNullOrWhiteSpace(outputDir))
-                    outputDir = Path.Combine(Path.GetTempPath(), "revit-mcp-exports");
-
-                var encoding = (parameters.TryGetValue("csv_encoding", out var encObj) ? encObj?.ToString() : null)?.ToLowerInvariant();
-                bool withBom = encoding != "utf8"; // default utf8-bom
-
                 // ─── Write CSV if requested ───
                 string csvPath = null;
                 Dictionary<string, object> verification = null;
@@ -139,32 +167,64 @@ namespace RevitMCP.CommandSet.Commands.Export
                     Directory.CreateDirectory(outputDir);
                     var safeName = SanitizeFileName(schedule.Name);
                     csvPath = Path.Combine(outputDir, safeName + ".csv");
+                    if (File.Exists(csvPath) && !overwrite)
+                        return Task.FromResult(CommandResult.Fail(
+                            $"Export target already exists: {csvPath}",
+                            "Set overwrite=true to replace it atomically, choose another output_dir, or rename the existing file."));
 
                     var enc = withBom ? new UTF8Encoding(true) : new UTF8Encoding(false);
-                    using (var writer = new StreamWriter(csvPath, false, enc))
+                    var tempPath = csvPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    try
                     {
-                        writer.WriteLine(string.Join(",", headers.Select(CsvEscape)));
-                        foreach (var row in rows)
-                            writer.WriteLine(string.Join(",", row.Select(CsvEscape)));
+                        using (var writer = new StreamWriter(tempPath, false, enc))
+                        {
+                            writer.WriteLine(string.Join(",", headers.Select(CsvEscape)));
+                            foreach (var row in rows)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                writer.WriteLine(string.Join(",", row.Select(CsvEscape)));
+                            }
+                        }
+
+                        if (File.Exists(csvPath))
+                            File.Replace(tempPath, csvPath, null);
+                        else
+                            File.Move(tempPath, csvPath);
+                    }
+                    finally
+                    {
+                        if (File.Exists(tempPath))
+                            File.Delete(tempPath);
                     }
 
                     // ─── Harness Tier 1: post-export verification ───
-                    var info = new FileInfo(csvPath);
-                    int expectedLines = 1 + rows.Count; // header + body
-                    int actualLines = -1;
-                    try { actualLines = File.ReadAllLines(csvPath, Encoding.UTF8).Length; }
-                    catch { /* swallow — report -1 */ }
-
-                    verification = new Dictionary<string, object>
+                    try
                     {
-                        ["performed"] = true,
-                        ["file_exists"] = info.Exists,
-                        ["file_size_bytes"] = info.Exists ? info.Length : 0,
-                        ["expected_lines"] = expectedLines,
-                        ["actual_lines"] = actualLines,
-                        ["line_count_match"] = actualLines == expectedLines,
-                        ["encoding"] = withBom ? "utf8-bom" : "utf8",
-                    };
+                        var info = new FileInfo(csvPath);
+                        int expectedRecords = 1 + rows.Count;
+                        int actualRecords = CountCsvRecords(csvPath);
+                        verification = new Dictionary<string, object>
+                        {
+                            ["performed"] = true,
+                            ["file_exists"] = info.Exists,
+                            ["file_size_bytes"] = info.Exists ? info.Length : 0,
+                            ["expected_records"] = expectedRecords,
+                            ["actual_records"] = actualRecords,
+                            ["record_count_match"] = actualRecords == expectedRecords,
+                            ["sha256"] = ComputeSha256(csvPath),
+                            ["encoding"] = withBom ? "utf8-bom" : "utf8",
+                            ["overwrite"] = overwrite,
+                        };
+                    }
+                    catch (Exception verificationError)
+                    {
+                        verification = new Dictionary<string, object>
+                        {
+                            ["performed"] = false,
+                            ["file_exists"] = File.Exists(csvPath),
+                            ["error"] = verificationError.Message
+                        };
+                    }
                 }
 
                 // ─── Build result ───
@@ -172,7 +232,7 @@ namespace RevitMCP.CommandSet.Commands.Export
                 var result = new Dictionary<string, object>
                 {
                     ["schedule_name"] = schedule.Name,
-                    ["view_id"] = schedule.Id.IntegerValue,
+                    ["view_id"] = schedule.Id.GetValue(),
                     ["category"] = category,
                     ["column_count"] = colCount,
                     ["row_count"] = rows.Count,
@@ -180,6 +240,7 @@ namespace RevitMCP.CommandSet.Commands.Export
                 };
 
                 if (csvPath != null) result["csv_path"] = csvPath;
+                if (csvPath != null) result["file_written"] = true;
 
                 if (format == "json" || format == "both")
                 {
@@ -236,9 +297,9 @@ namespace RevitMCP.CommandSet.Commands.Export
             // 1. By ID (priority)
             if (parameters != null && parameters.TryGetValue("schedule_id", out var idObj) && idObj != null)
             {
-                if (TryParseInt(idObj, out var idInt))
+                if (TryParseElementId(idObj, out var idInt))
                 {
-                    var elem = doc.GetElement(new ElementId(idInt));
+                    var elem = doc.GetElement(ElementIdCompatibility.Create(idInt));
                     if (elem is ViewSchedule vs) return vs;
                     failReason = $"Element id {idInt} is not a ViewSchedule (got {elem?.GetType().Name ?? "null"}).";
                     return null;
@@ -302,7 +363,7 @@ namespace RevitMCP.CommandSet.Commands.Export
                 var defn = schedule.Definition;
                 if (defn == null) return null;
                 var catId = defn.CategoryId;
-                if (catId == null || catId.IntegerValue == -1) return "Multi-Category";
+                if (catId == null || catId.GetValue() == -1) return "Multi-Category";
                 // Use fully-qualified name — the IRevitCommand interface exposes a
                 // string property called `Category` which would shadow the Revit
                 // Category class inside this file.
@@ -378,11 +439,57 @@ namespace RevitMCP.CommandSet.Commands.Export
             return result;
         }
 
-        private static bool TryParseInt(object obj, out int value)
+        private static int CountCsvRecords(string path)
+        {
+            var records = 0;
+            var inQuotes = false;
+            var sawAnyCharacter = false;
+            var endedWithNewline = false;
+            using (var reader = new StreamReader(path, Encoding.UTF8, true))
+            {
+                int value;
+                while ((value = reader.Read()) >= 0)
+                {
+                    sawAnyCharacter = true;
+                    var ch = (char)value;
+                    endedWithNewline = false;
+                    if (ch == '"')
+                    {
+                        if (inQuotes && reader.Peek() == '"')
+                        {
+                            reader.Read();
+                            continue;
+                        }
+                        inQuotes = !inQuotes;
+                    }
+                    else if (ch == '\n' && !inQuotes)
+                    {
+                        records++;
+                        endedWithNewline = true;
+                    }
+                }
+            }
+            if (inQuotes)
+                throw new InvalidDataException("CSV verification found an unterminated quoted field.");
+            if (sawAnyCharacter && !endedWithNewline)
+                records++;
+            return records;
+        }
+
+        private static string ComputeSha256(string path)
+        {
+            using (var stream = File.OpenRead(path))
+            using (var sha = SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(stream))
+                    .Replace("-", string.Empty)
+                    .ToLowerInvariant();
+        }
+
+        private static bool TryParseElementId(object obj, out long value)
         {
             value = 0;
             if (obj == null) return false;
-            try { value = Convert.ToInt32(obj); return true; }
+            try { value = Convert.ToInt64(obj); return value > 0; }
             catch { return false; }
         }
     }

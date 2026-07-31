@@ -1,5 +1,7 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
+using System.Threading;
 using Autodesk.AutoCAD.ApplicationServices;
 
 // Don't `using Autodesk.AutoCAD.Runtime;` here — it pulls in another `Exception`
@@ -17,18 +19,65 @@ namespace AutoCADMCP.Plugin
     /// </summary>
     public class AcadMCPApp : Autodesk.AutoCAD.Runtime.IExtensionApplication
     {
+        private const int DefaultPort = 8182;
         private static AcadWebSocketServer _server;
+        private static Timer _serverRetryTimer;
+        private static int _shutdownRequested;
+        private static readonly object _serverLifecycleLock = new object();
 
         public void Initialize()
         {
             try
             {
+                Interlocked.Exchange(ref _shutdownRequested, 0);
                 Debug.WriteLine("[AutoCADMCP] AcadMCPApp.Initialize() called.");
 
-                _server = new AcadWebSocketServer(port: 8182);
-                _server.Start();
+                var port = ResolveServerPort();
+                _server = new AcadWebSocketServer(port);
+                if (_server.Start())
+                {
+                    WriteToEditor(
+                        $"[AutoCADMCP] WebSocket server listening on :{port}");
+                }
+                else
+                {
+                    WriteToEditor(
+                        $"[AutoCADMCP] Could not bind :{port}; " +
+                        "retrying every 2 seconds.");
+                    _serverRetryTimer = new Timer(
+                        _ =>
+                        {
+                            try
+                            {
+                                lock (_serverLifecycleLock)
+                                {
+                                    if (Volatile.Read(
+                                            ref _shutdownRequested) != 0)
+                                    {
+                                        return;
+                                    }
 
-                WriteToEditor("[AutoCADMCP] WebSocket server listening on :8182");
+                                    if (_server?.Start() == true)
+                                    {
+                                        Debug.WriteLine(
+                                            $"[AutoCADMCP] WebSocket retry " +
+                                            $"succeeded on :{port}.");
+                                        Interlocked.Exchange(
+                                            ref _serverRetryTimer,
+                                            null)?.Dispose();
+                                    }
+                                }
+                            }
+                            catch (Exception retryError)
+                            {
+                                Debug.WriteLine(
+                                    $"[AutoCADMCP] WebSocket retry failed: {retryError.Message}");
+                            }
+                        },
+                        null,
+                        TimeSpan.FromSeconds(2),
+                        TimeSpan.FromSeconds(2));
+                }
             }
             catch (Exception ex)
             {
@@ -37,11 +86,38 @@ namespace AutoCADMCP.Plugin
             }
         }
 
+        private static int ResolveServerPort()
+        {
+            var configured = Environment.GetEnvironmentVariable(
+                "AUTOCAD_MCP_PORT");
+            if (string.IsNullOrWhiteSpace(configured))
+                return DefaultPort;
+
+            if (!int.TryParse(
+                    configured.Trim(),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var port) ||
+                port < 1 ||
+                port > 65535)
+            {
+                throw new InvalidOperationException(
+                    "AUTOCAD_MCP_PORT must be an integer from 1 to 65535.");
+            }
+
+            return port;
+        }
+
         public void Terminate()
         {
             try
             {
-                _server?.Stop();
+                Interlocked.Exchange(ref _shutdownRequested, 1);
+                Interlocked.Exchange(ref _serverRetryTimer, null)?.Dispose();
+                lock (_serverLifecycleLock)
+                {
+                    Interlocked.Exchange(ref _server, null)?.Stop();
+                }
                 Debug.WriteLine("[AutoCADMCP] AcadMCPApp.Terminate() called.");
             }
             catch (Exception ex)

@@ -1,17 +1,13 @@
 /**
- * View Tools — Tools for controlling Revit view state and element visibility.
- *
- * Tools:
- *   revit_set_active_view      — Switch to a specific view
- *   revit_isolate_elements     — Isolate or hide elements in a view
- *   revit_reset_view_isolation — Reset temporary isolation/hiding
- *   revit_select_elements      — Select elements in the Revit UI
+ * Tools for controlling Revit view state and element visibility.
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { BATCH_TIMEOUT_MS } from "@kimminsub/mcp-cad-core";
 import type { RevitWebSocketClient } from "../services/websocket-client.js";
 import { sendAndFormat } from "../services/response-formatter.js";
+import { elementIdSchema, idempotencyKeySchema } from "./shared.js";
 
 const VIEW_ANNOTATIONS = {
   readOnlyHint: false,
@@ -20,127 +16,222 @@ const VIEW_ANNOTATIONS = {
   openWorldHint: false,
 } as const;
 
+const DUPLICATE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
+const SET_ACTIVE_VIEW_INPUT_SCHEMA = z
+  .object({
+    view_name: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("View name (exact match first, then partial match)."),
+    view_id: elementIdSchema("View ElementId")
+      .optional()
+      .describe("View ElementId. Takes precedence over view_name."),
+    idempotency_key: idempotencyKeySchema(),
+  })
+  .refine(
+    (value) => value.view_id !== undefined || value.view_name !== undefined,
+    { message: "Provide view_id or a non-empty view_name." }
+  );
+
+const DUPLICATE_VIEWS_INPUT_SCHEMA = z
+  .object({
+    view_ids: z
+      .array(elementIdSchema("View ElementId"))
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Target view ElementIds. Use with or instead of view_names."),
+    view_names: z
+      .array(z.string().trim().min(1))
+      .min(1)
+      .max(100)
+      .optional()
+      .describe(
+        "Target names (exact match first, then contains). Templates are excluded."
+      ),
+    option: z
+      .enum(["duplicate", "with_detailing", "as_dependent"])
+      .optional()
+      .default("duplicate")
+      .describe("Duplication mode."),
+    name_suffix: z
+      .string()
+      .max(200)
+      .optional()
+      .describe(
+        "Suffix for each new view name. Name collisions are auto-incremented."
+      ),
+    activate: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Activate the first newly created view."),
+    idempotency_key: idempotencyKeySchema(),
+  })
+  .superRefine((value, ctx) => {
+    const targetCount =
+      (value.view_ids?.length ?? 0) + (value.view_names?.length ?? 0);
+    if (targetCount === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide at least one view_id or view_name.",
+      });
+    } else if (targetCount > 100) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "The combined number of view_ids and view_names cannot exceed 100.",
+      });
+    }
+  });
+
 export function registerViewTools(
   server: McpServer,
   wsClient: RevitWebSocketClient
 ): void {
-  // ─── revit_set_active_view ───
   server.registerTool(
     "revit_set_active_view",
     {
       title: "Set Active View",
-      description: `Switch to a specific view in Revit by name or ID.
+      description: `Switch Revit to a view by ElementId or name.
 
-Supports exact and partial name matching. Use revit_get_views to find available views.
-
-Examples:
-  - By name: set_active_view(view_name="Level 1")
-  - By ID: set_active_view(view_id=12345)
-  - Partial: set_active_view(view_name="3D") → matches "3D View" or "{3D}"`,
-      inputSchema: {
-        view_name: z
-          .string()
-          .optional()
-          .describe("View name to activate (exact or partial match)"),
-        view_id: z
-          .number()
-          .optional()
-          .describe("View ID to activate (takes precedence over name)"),
-      },
+Name resolution tries a case-insensitive exact match first, then a partial
+match. Use revit_get_views to discover unambiguous names or IDs.`,
+      inputSchema: SET_ACTIVE_VIEW_INPUT_SCHEMA,
       annotations: VIEW_ANNOTATIONS,
     },
-    async (params) => {
-      return sendAndFormat(wsClient, "set_active_view", {
+    async (params) =>
+      sendAndFormat(wsClient, "set_active_view", {
         view_name: params.view_name ?? null,
         view_id: params.view_id ?? null,
-      });
-    }
+        idempotency_key: params.idempotency_key,
+      })
   );
 
-  // ─── revit_isolate_elements ───
   server.registerTool(
     "revit_isolate_elements",
     {
       title: "Isolate/Hide Elements in View",
-      description: `Isolate or hide specific elements in a Revit view.
+      description: `Temporarily isolate or hide elements in a view.
 
-**Isolate mode (default):** Only the specified elements are visible; everything else is hidden.
-**Hide mode:** The specified elements are hidden; everything else remains visible.
-
-Use revit_reset_view_isolation to undo.
-
-This was requested for "현재 뷰에서 특정 요소만 보여줘" (show only specific elements in current view).
-
-Example: Show only 2 beams → isolate_elements(element_ids=[12345, 67890])`,
+"isolate" shows only the supplied elements; "hide" hides the supplied
+elements. Use revit_reset_view_isolation to restore normal visibility.`,
       inputSchema: {
         element_ids: z
-          .array(z.number())
-          .describe("Array of element IDs to isolate or hide"),
+          .array(elementIdSchema("Element ID"))
+          .min(1)
+          .max(500)
+          .describe("ElementIds to isolate or hide (1-500)."),
         mode: z
           .enum(["isolate", "hide"])
           .optional()
-          .default("isolate")
-          .describe('"isolate" = show only these, "hide" = hide these (default: isolate)'),
-        view_id: z
-          .number()
+          .default("isolate"),
+        view_id: elementIdSchema("Target view ElementId")
           .optional()
-          .describe("Target view ID (default: active view)"),
+          .describe("Target view ElementId. Default is the active view."),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: VIEW_ANNOTATIONS,
     },
-    async (params) => {
-      return sendAndFormat(wsClient, "isolate_elements", {
-        element_ids: params.element_ids,
-        mode: params.mode ?? "isolate",
-        view_id: params.view_id ?? null,
-      });
-    }
+    async (params) =>
+      sendAndFormat(
+        wsClient,
+        "isolate_elements",
+        {
+          element_ids: params.element_ids,
+          mode: params.mode ?? "isolate",
+          view_id: params.view_id ?? null,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      )
   );
 
-  // ─── revit_reset_view_isolation ───
   server.registerTool(
     "revit_reset_view_isolation",
     {
       title: "Reset View Isolation",
-      description: `Reset temporary element isolation/hiding in a view — makes all elements visible again.
-
-Use this after revit_isolate_elements to restore normal view.`,
+      description:
+        "Reset temporary isolation or hiding in the target view and restore normal visibility.",
       inputSchema: {
-        view_id: z
-          .number()
+        view_id: elementIdSchema("Target view ElementId")
           .optional()
-          .describe("Target view ID (default: active view)"),
+          .describe("Target view ElementId. Default is the active view."),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: VIEW_ANNOTATIONS,
     },
-    async (params) => {
-      return sendAndFormat(wsClient, "reset_view_isolation", {
+    async (params) =>
+      sendAndFormat(wsClient, "reset_view_isolation", {
         view_id: params.view_id ?? null,
-      });
-    }
+        idempotency_key: params.idempotency_key,
+      })
   );
 
-  // ─── revit_select_elements ───
   server.registerTool(
     "revit_select_elements",
     {
       title: "Select Elements",
-      description: `Select elements in the Revit UI, highlighting them in the current view.
-
-Use this to draw the user's attention to specific elements after a query.
-
-Example: Select 3 walls → select_elements(element_ids=[111, 222, 333])`,
+      description:
+        "Select and highlight elements in the Revit UI after a query or review.",
       inputSchema: {
         element_ids: z
-          .array(z.number())
-          .describe("Array of element IDs to select"),
+          .array(elementIdSchema("Element ID"))
+          .min(1)
+          .max(500)
+          .describe("ElementIds to select (1-500)."),
+        idempotency_key: idempotencyKeySchema(),
       },
       annotations: VIEW_ANNOTATIONS,
     },
-    async (params) => {
-      return sendAndFormat(wsClient, "select_elements", {
-        element_ids: params.element_ids,
-      });
-    }
+    async (params) =>
+      sendAndFormat(
+        wsClient,
+        "select_elements",
+        {
+          element_ids: params.element_ids,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      )
+  );
+
+  server.registerTool(
+    "revit_duplicate_views",
+    {
+      title: "Duplicate Views (batch)",
+      description: `Duplicate up to 100 views in one transaction.
+
+Targets may be IDs and/or names. Name resolution tries exact match first,
+then contains, and excludes templates. "with_detailing" includes
+view-specific annotations. "as_dependent" is limited to Revit view types that
+support dependent duplication; unsupported targets are returned with a reason.
+
+Pass idempotency_key and reuse it if a timeout makes the result uncertain.`,
+      inputSchema: DUPLICATE_VIEWS_INPUT_SCHEMA,
+      annotations: DUPLICATE_ANNOTATIONS,
+    },
+    async (params) =>
+      sendAndFormat(
+        wsClient,
+        "duplicate_views",
+        {
+          view_ids: params.view_ids ?? null,
+          view_names: params.view_names ?? null,
+          option: params.option ?? "duplicate",
+          name_suffix: params.name_suffix ?? null,
+          activate: params.activate ?? false,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      )
   );
 }

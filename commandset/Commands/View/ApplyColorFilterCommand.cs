@@ -12,8 +12,8 @@ namespace RevitMCP.CommandSet.Commands.View
     /// <summary>
     /// Apply or clear a per-element graphic override (color) on a view.
     ///
-    /// Use case: visualize "어떤 type이 미반영", "SK_MATE 타입 강조" 같은 검토 결과 —
-    /// override line + surface fill so the reviewer can spot them at a glance.
+    /// Use case: visualize unmatched types or highlight a review group by
+    /// overriding line and surface fill so reviewers can spot them at a glance.
     ///
     /// Parameters:
     ///   view_id (int, optional)            — Target view. Default = active view.
@@ -53,6 +53,54 @@ namespace RevitMCP.CommandSet.Commands.View
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 parameters = parameters ?? new Dictionary<string, object>();
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "max_elements",
+                        defaultValue: 5000,
+                        minValue: 1,
+                        maxValue: 50_000,
+                        out var maxElements,
+                        out var maxElementsError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        maxElementsError,
+                        "Pass max_elements as an integer from 1 through 50000."));
+                }
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "transparency",
+                        defaultValue: 0,
+                        minValue: 0,
+                        maxValue: 100,
+                        out var requestedTransparency,
+                        out var transparencyError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        transparencyError,
+                        "Pass transparency as an integer from 0 through 100."));
+                }
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "surface_fill",
+                        defaultValue: true,
+                        out var requestedSurfaceFill,
+                        out var surfaceFillError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        surfaceFillError,
+                        "Pass surface_fill as true or false, or omit it to use true."));
+                }
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "halftone",
+                        defaultValue: false,
+                        out var requestedHalftone,
+                        out var halftoneError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        halftoneError,
+                        "Pass halftone as true or false, or omit it to use false."));
+                }
 
                 // ─── Resolve target view ───
                 var view = ResolveView(doc, parameters);
@@ -79,7 +127,7 @@ namespace RevitMCP.CommandSet.Commands.View
                         "Use mode=\"apply\" (set override) or mode=\"clear\" (remove override)."));
 
                 // ─── Resolve elements ───
-                var selectorOpts = BuildSelector(parameters, view.Id);
+                var selectorOpts = BuildSelector(parameters, view.Id, maxElements);
                 var sel = ElementSelector.Resolve(doc, selectorOpts);
                 if (sel.Elements.Count == 0)
                 {
@@ -93,6 +141,7 @@ namespace RevitMCP.CommandSet.Commands.View
                 // ─── Build OverrideGraphicSettings ───
                 OverrideGraphicSettings ogs;
                 Color appliedColor = null;
+                bool appliedSurfaceFill = false;
                 bool appliedHalftone = false;
                 int appliedTransparency = 0;
 
@@ -103,29 +152,47 @@ namespace RevitMCP.CommandSet.Commands.View
                 }
                 else
                 {
-                    var colorStr = (parameters.TryGetValue("color", out var cObj) ? cObj?.ToString() : null);
-                    appliedColor = ParseColor(colorStr) ?? new Color(255, 0, 0); // default red
+                    var colorStr =
+                        parameters.TryGetValue("color", out var cObj)
+                            ? cObj?.ToString()
+                            : null;
+                    if (string.IsNullOrWhiteSpace(colorStr))
+                        colorStr = "red";
+                    appliedColor = ParseColor(colorStr);
+                    if (appliedColor == null)
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            $"Unsupported color '{colorStr}'.",
+                            "Use red, orange, yellow, green, blue, magenta, " +
+                            "cyan, gray, or an r,g,b triple with values 0-255."));
+                    }
 
-                    var surfaceFill = !parameters.TryGetValue("surface_fill", out var sfObj) || sfObj == null || Convert.ToBoolean(sfObj);
-                    appliedHalftone = parameters.TryGetValue("halftone", out var htObj) && htObj != null && Convert.ToBoolean(htObj);
-                    appliedTransparency = ClampInt(parameters.TryGetValue("transparency", out var trObj) ? trObj : 0, 0, 100);
+                    appliedSurfaceFill = requestedSurfaceFill;
+                    appliedHalftone = requestedHalftone;
+                    appliedTransparency = requestedTransparency;
 
                     ogs = new OverrideGraphicSettings();
                     ogs.SetProjectionLineColor(appliedColor);
                     ogs.SetCutLineColor(appliedColor);
 
-                    if (surfaceFill)
+                    if (appliedSurfaceFill)
                     {
                         var solidPatternId = GetSolidFillPatternId(doc);
-                        if (solidPatternId != null && solidPatternId != ElementId.InvalidElementId)
+                        if (solidPatternId == null ||
+                            solidPatternId == ElementId.InvalidElementId)
                         {
-                            ogs.SetSurfaceForegroundPatternId(solidPatternId);
-                            ogs.SetSurfaceForegroundPatternColor(appliedColor);
-                            ogs.SetSurfaceForegroundPatternVisible(true);
-                            ogs.SetCutForegroundPatternId(solidPatternId);
-                            ogs.SetCutForegroundPatternColor(appliedColor);
-                            ogs.SetCutForegroundPatternVisible(true);
+                            return Task.FromResult(CommandResult.Fail(
+                                "No solid fill pattern is available for surface_fill=true.",
+                                "Load or restore Revit's solid drafting fill pattern, " +
+                                "or retry with surface_fill=false."));
                         }
+
+                        ogs.SetSurfaceForegroundPatternId(solidPatternId);
+                        ogs.SetSurfaceForegroundPatternColor(appliedColor);
+                        ogs.SetSurfaceForegroundPatternVisible(true);
+                        ogs.SetCutForegroundPatternId(solidPatternId);
+                        ogs.SetCutForegroundPatternColor(appliedColor);
+                        ogs.SetCutForegroundPatternVisible(true);
                     }
 
                     ogs.SetSurfaceTransparency(appliedTransparency);
@@ -134,7 +201,8 @@ namespace RevitMCP.CommandSet.Commands.View
 
                 // ─── Apply (transactional) ───
                 int applied = 0;
-                int skipped = 0;
+                var appliedIds = new List<ElementId>();
+                var skipped = new List<Dictionary<string, object>>();
                 using (var tx = new Transaction(doc, $"MCP: {(mode == "apply" ? "Color filter" : "Clear color filter")}"))
                 {
                     tx.Start();
@@ -145,76 +213,169 @@ namespace RevitMCP.CommandSet.Commands.View
                         {
                             view.SetElementOverrides(elem.Id, ogs);
                             applied++;
+                            appliedIds.Add(elem.Id);
                         }
-                        catch
+                        catch (Exception ex)
                         {
-                            // Some elements (view-specific elements, model lines in 3D, etc.) reject overrides
-                            skipped++;
+                            skipped.Add(new Dictionary<string, object>
+                            {
+                                ["element_id"] = elem.Id.GetValue(),
+                                ["reason"] = ex.Message
+                            });
                         }
                     }
-                    tx.Commit();
+                    if (appliedIds.Count == 0)
+                    {
+                        tx.RollBack();
+                        var firstReason = skipped.Count > 0 &&
+                                          skipped[0].TryGetValue("reason", out var reason)
+                            ? reason?.ToString()
+                            : "Revit did not accept any override.";
+                        var verb = mode == "apply" ? "applied" : "cleared";
+                        return Task.FromResult(CommandResult.Fail(
+                            $"No graphic overrides were {verb} for " +
+                            $"{sel.Elements.Count} matched elements. " +
+                            $"First failure: {firstReason}",
+                            "Use a graphical view and verify that the selected elements " +
+                            "can receive view-specific overrides."));
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
                 }
 
                 // ─── Harness Tier 1: post-tx verification ───
                 // Re-read the first applied element's override and confirm color matches.
-                var verification = new Dictionary<string, object> { ["performed"] = true };
-                if (mode == "apply" && applied > 0)
+                var verification = new Dictionary<string, object>();
+                try
                 {
-                    var firstId = sel.Elements
-                        .Select(e => e.Id)
-                        .FirstOrDefault(id =>
-                        {
-                            try { return view.GetElementOverrides(id) != null; }
-                            catch { return false; }
-                        });
-                    if (firstId != null && firstId != ElementId.InvalidElementId)
+                    var firstId = appliedIds[0];
+                    var actual = view.GetElementOverrides(firstId);
+                    bool match;
+                    if (mode == "apply")
                     {
-                        var actual = view.GetElementOverrides(firstId);
                         var actualColor = actual.ProjectionLineColor;
-                        var match = actualColor != null && actualColor.IsValid
-                                    && actualColor.Red == appliedColor.Red
-                                    && actualColor.Green == appliedColor.Green
-                                    && actualColor.Blue == appliedColor.Blue;
-                        verification["color_match"] = match;
-                        verification["sample_element_id"] = firstId.IntegerValue;
-                        verification["sample_color_rgb"] = actualColor != null && actualColor.IsValid
-                            ? $"{actualColor.Red},{actualColor.Green},{actualColor.Blue}"
-                            : "(unset)";
+                        var projectionColorMatch =
+                            ColorsEqual(actualColor, appliedColor);
+                        var cutColorMatch =
+                            ColorsEqual(actual.CutLineColor, appliedColor);
+                        var transparencyMatch =
+                            actual.Transparency == appliedTransparency;
+                        var halftoneMatch =
+                            actual.Halftone == appliedHalftone;
+                        var surfaceFillMatch =
+                            !appliedSurfaceFill ||
+                            (actual.SurfaceForegroundPatternId != null &&
+                             actual.SurfaceForegroundPatternId !=
+                             ElementId.InvalidElementId &&
+                             actual.CutForegroundPatternId != null &&
+                             actual.CutForegroundPatternId !=
+                             ElementId.InvalidElementId &&
+                             ColorsEqual(
+                                 actual.SurfaceForegroundPatternColor,
+                                 appliedColor) &&
+                             ColorsEqual(
+                                 actual.CutForegroundPatternColor,
+                                 appliedColor));
+                        match = projectionColorMatch &&
+                                cutColorMatch &&
+                                transparencyMatch &&
+                                halftoneMatch &&
+                                surfaceFillMatch;
+
+                        verification["projection_color_match"] =
+                            projectionColorMatch;
+                        verification["cut_color_match"] = cutColorMatch;
+                        verification["transparency_match"] =
+                            transparencyMatch;
+                        verification["halftone_match"] = halftoneMatch;
+                        verification["surface_fill_match"] =
+                            surfaceFillMatch;
+                        verification["color_match"] =
+                            projectionColorMatch && cutColorMatch;
+                        verification["sample_element_id"] = firstId.GetValue();
+                        verification["sample_color_rgb"] =
+                            actualColor != null && actualColor.IsValid
+                                ? $"{actualColor.Red},{actualColor.Green},{actualColor.Blue}"
+                                : "(unset)";
+                        verification["sample_transparency"] =
+                            actual.Transparency;
+                        verification["sample_halftone"] = actual.Halftone;
                     }
                     else
                     {
-                        verification["color_match"] = false;
-                        verification["note"] = "Could not re-fetch any overridden element to verify.";
+                        var projectionCleared =
+                            IsUnsetColor(actual.ProjectionLineColor);
+                        var cutCleared = IsUnsetColor(actual.CutLineColor);
+                        var surfacePatternCleared =
+                            actual.SurfaceForegroundPatternId == null ||
+                            actual.SurfaceForegroundPatternId ==
+                            ElementId.InvalidElementId;
+                        var cutPatternCleared =
+                            actual.CutForegroundPatternId == null ||
+                            actual.CutForegroundPatternId ==
+                            ElementId.InvalidElementId;
+                        var transparencyCleared =
+                            actual.Transparency == 0;
+                        var halftoneCleared = !actual.Halftone;
+                        match = projectionCleared &&
+                                cutCleared &&
+                                surfacePatternCleared &&
+                                cutPatternCleared &&
+                                transparencyCleared &&
+                                halftoneCleared;
+
+                        verification["projection_color_cleared"] =
+                            projectionCleared;
+                        verification["cut_color_cleared"] = cutCleared;
+                        verification["surface_pattern_cleared"] =
+                            surfacePatternCleared;
+                        verification["cut_pattern_cleared"] =
+                            cutPatternCleared;
+                        verification["transparency_cleared"] =
+                            transparencyCleared;
+                        verification["halftone_cleared"] = halftoneCleared;
+                        verification["cleared"] = match;
+                        verification["sample_element_id"] = firstId.GetValue();
                     }
+
+                    verification["performed"] = true;
+                    verification["match"] = match;
                 }
-                else if (mode == "clear" && applied > 0)
+                catch (Exception verificationError)
                 {
-                    // After clear, override should be the empty default — projection line color should be invalid/unset.
-                    var firstId = sel.Elements[0].Id;
-                    var actual = view.GetElementOverrides(firstId);
-                    var col = actual.ProjectionLineColor;
-                    verification["cleared"] = col == null || !col.IsValid;
-                    verification["sample_element_id"] = firstId.IntegerValue;
+                    verification.Clear();
+                    verification["performed"] = false;
+                    verification["match"] = false;
+                    verification["error"] = verificationError.Message;
                 }
 
-                // ─── Result ───
                 var result = new Dictionary<string, object>
                 {
-                    ["view_id"] = view.Id.IntegerValue,
+                    ["view_id"] = view.Id.GetValue(),
                     ["view_name"] = view.Name,
                     ["mode"] = mode,
                     ["matched_count"] = sel.Elements.Count,
                     ["applied_count"] = applied,
-                    ["skipped_count"] = skipped,
+                    ["skipped_count"] = skipped.Count,
+                    ["applied_element_ids"] = appliedIds
+                        .Take(50)
+                        .Select(id => id.GetValue())
+                        .ToList(),
+                    ["applied_element_ids_truncated"] =
+                        appliedIds.Count > 50,
+                    ["skipped_sample"] = skipped.Take(25).ToList(),
                     ["truncated"] = sel.TruncatedToMaxCount,
                     ["filters"] = sel.AppliedFilters,
                     ["verification"] = verification,
+                    ["mutation_committed"] = appliedIds.Count > 0,
                 };
                 if (mode == "apply")
                 {
                     result["color_rgb"] = $"{appliedColor.Red},{appliedColor.Green},{appliedColor.Blue}";
                     result["transparency"] = appliedTransparency;
                     result["halftone"] = appliedHalftone;
+                    result["surface_fill"] = appliedSurfaceFill;
                 }
                 return Task.FromResult(CommandResult.Ok(result));
             }
@@ -240,30 +401,37 @@ namespace RevitMCP.CommandSet.Commands.View
             {
                 try
                 {
-                    var view = doc.GetElement(new ElementId(Convert.ToInt32(vidObj))) as Autodesk.Revit.DB.View;
+                    var view = doc.GetElement(ElementIdCompatibility.Create(Convert.ToInt64(vidObj))) as Autodesk.Revit.DB.View;
                     if (view != null && !view.IsTemplate) return view;
                 }
-                catch { /* fall through */ }
+                catch { }
+                return null;
             }
             return doc.ActiveView;
         }
 
-        private static ElementSelectorOptions BuildSelector(Dictionary<string, object> p, ElementId viewId)
+        private static ElementSelectorOptions BuildSelector(
+            Dictionary<string, object> p,
+            ElementId viewId,
+            int maxElements)
         {
             var opts = new ElementSelectorOptions
             {
                 ViewId = viewId,
-                MaxCount = p.TryGetValue("max_elements", out var mxObj) && mxObj != null
-                    ? Math.Max(1, Convert.ToInt32(mxObj))
-                    : 5000,
+                MaxCount = maxElements,
             };
 
             if (p.TryGetValue("element_ids", out var eidsObj) && eidsObj is System.Collections.IEnumerable eids && !(eidsObj is string))
             {
-                opts.ElementIds = new List<int>();
+                opts.ElementIds = new List<long>();
                 foreach (var item in eids)
                 {
-                    try { opts.ElementIds.Add(Convert.ToInt32(item)); } catch { }
+                    try { opts.ElementIds.Add(Convert.ToInt64(item)); }
+                    catch
+                    {
+                        throw new ArgumentException(
+                            $"element_ids contains a non-integer value: '{item}'.");
+                    }
                 }
             }
 
@@ -308,14 +476,66 @@ namespace RevitMCP.CommandSet.Commands.View
             return null;
         }
 
-        private static int ClampInt(object obj, int min, int max)
+        private static bool ColorsEqual(Color actual, Color expected)
         {
-            try
+            return actual != null &&
+                   expected != null &&
+                   actual.IsValid &&
+                   expected.IsValid &&
+                   actual.Red == expected.Red &&
+                   actual.Green == expected.Green &&
+                   actual.Blue == expected.Blue;
+        }
+
+        private static bool IsUnsetColor(Color color)
+        {
+            return color == null || !color.IsValid;
+        }
+
+        private static bool TryGetBoundedInt(
+            Dictionary<string, object> p,
+            string key,
+            int defaultValue,
+            int minValue,
+            int maxValue,
+            out int value,
+            out string error)
+        {
+            value = defaultValue;
+            error = null;
+            if (!p.TryGetValue(key, out var raw))
+                return true;
+
+            long parsed;
+            switch (raw)
             {
-                var v = Convert.ToInt32(obj);
-                return Math.Max(min, Math.Min(max, v));
+                case int i:
+                    parsed = i;
+                    break;
+                case long l:
+                    parsed = l;
+                    break;
+                case double d when !double.IsNaN(d) &&
+                                   !double.IsInfinity(d) &&
+                                   d == Math.Truncate(d) &&
+                                   d >= long.MinValue &&
+                                   d <= long.MaxValue:
+                    parsed = (long)d;
+                    break;
+                default:
+                    error = $"{key} must be an integer from {minValue} through {maxValue}.";
+                    return false;
             }
-            catch { return min; }
+
+            if (parsed < minValue || parsed > maxValue)
+            {
+                error =
+                    $"{key} must be from {minValue} through {maxValue}; received {parsed}.";
+                return false;
+            }
+
+            value = (int)parsed;
+            return true;
         }
 
         private static ElementId GetSolidFillPatternId(Document doc)

@@ -3,6 +3,7 @@
 
 export {
   clampPageSize,
+  CursorValidationError,
   parseCursor,
   createCursor,
   buildPaginatedResult,

@@ -38,8 +38,30 @@ namespace AutoCADMCP.CommandSet.Commands
                 var entityType = GetString(parameters, "entity_type");
                 var layer = GetString(parameters, "layer");
                 var summaryOnly = GetBool(parameters, "summary_only", defaultValue: true);
-                var limit = (int)Math.Max(1, Math.Min(200, GetLong(parameters, "limit", 50)));
-                var offset = (int)Math.Max(0, GetLong(parameters, "offset", 0));
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "limit",
+                        defaultValue: 50,
+                        minValue: 1,
+                        maxValue: 200,
+                        out var limit,
+                        out var limitError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        limitError,
+                        "Pass limit as an integer from 1 through 200."));
+                }
+                if (!TryGetNonNegativeLong(
+                        parameters,
+                        "offset",
+                        defaultValue: 0,
+                        out var offset,
+                        out var offsetError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        offsetError,
+                        "Pass offset as a non-negative integer."));
+                }
 
                 var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
                 var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
@@ -88,7 +110,9 @@ namespace AutoCADMCP.CommandSet.Commands
                 }
 
                 // Paginated detail.
-                var page = matched.Skip(offset).Take(limit);
+                var page = offset >= matched.Count
+                    ? Enumerable.Empty<ObjectId>()
+                    : matched.Skip((int)offset).Take(limit);
                 var items = new List<Dictionary<string, object>>();
                 foreach (var id in page)
                 {
@@ -102,7 +126,8 @@ namespace AutoCADMCP.CommandSet.Commands
                     ["total_count"] = total,
                     ["returned_count"] = items.Count,
                     ["offset"] = offset,
-                    ["has_more"] = (offset + items.Count) < total,
+                    ["has_more"] =
+                        offset < total && items.Count < (total - offset),
                     ["items"] = items,
                     ["filters_applied"] = new Dictionary<string, object>
                     {
@@ -168,17 +193,90 @@ namespace AutoCADMCP.CommandSet.Commands
 
         private static string GetString(Dictionary<string, object> p, string key)
             => p.TryGetValue(key, out var v) && v is string s ? s : null;
-        private static long GetLong(Dictionary<string, object> p, string key, long def)
+        private static bool TryGetBoundedInt(
+            Dictionary<string, object> p,
+            string key,
+            int defaultValue,
+            int minValue,
+            int maxValue,
+            out int value,
+            out string error)
         {
-            if (!p.TryGetValue(key, out var v) || v == null) return def;
-            return v switch
+            value = defaultValue;
+            error = null;
+            if (!TryGetIntegralValue(p, key, out var supplied, out var parsed))
             {
-                long l => l,
-                int i => i,
-                double d => (long)d,
-                string s when long.TryParse(s, out var sl) => sl,
-                _ => def,
-            };
+                error = $"{key} must be an integer from {minValue} through {maxValue}.";
+                return false;
+            }
+            if (!supplied)
+                return true;
+            if (parsed < minValue || parsed > maxValue)
+            {
+                error =
+                    $"{key} must be from {minValue} through {maxValue}; received {parsed}.";
+                return false;
+            }
+
+            value = (int)parsed;
+            return true;
+        }
+
+        private static bool TryGetNonNegativeLong(
+            Dictionary<string, object> p,
+            string key,
+            long defaultValue,
+            out long value,
+            out string error)
+        {
+            value = defaultValue;
+            error = null;
+            if (!TryGetIntegralValue(p, key, out var supplied, out var parsed))
+            {
+                error = $"{key} must be a non-negative integer.";
+                return false;
+            }
+            if (!supplied)
+                return true;
+            if (parsed < 0)
+            {
+                error = $"{key} must be non-negative; received {parsed}.";
+                return false;
+            }
+
+            value = parsed;
+            return true;
+        }
+
+        private static bool TryGetIntegralValue(
+            Dictionary<string, object> p,
+            string key,
+            out bool supplied,
+            out long value)
+        {
+            supplied = p.TryGetValue(key, out var raw);
+            value = 0;
+            if (!supplied)
+                return true;
+
+            switch (raw)
+            {
+                case int i:
+                    value = i;
+                    return true;
+                case long l:
+                    value = l;
+                    return true;
+                case double d when !double.IsNaN(d) &&
+                                   !double.IsInfinity(d) &&
+                                   d == Math.Truncate(d) &&
+                                   d >= long.MinValue &&
+                                   d <= long.MaxValue:
+                    value = (long)d;
+                    return true;
+                default:
+                    return false;
+            }
         }
         private static bool GetBool(Dictionary<string, object> p, string key, bool defaultValue)
         {

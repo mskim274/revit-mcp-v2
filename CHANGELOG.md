@@ -6,6 +6,94 @@ changes are still fair game.
 
 ---
 
+## [Unreleased]
+
+### Added
+- Expanded the Revit MCP surface to 32 tools, including exact-match and
+  batch-query improvements, batch parameter modification, type management,
+  schedule export, review overlays and tagging, survey-coordinate pipe runs,
+  live C# script execution, and batch view duplication.
+- Added PR CI for npm workspace builds, clean-consumer tarball tests,
+  production dependency audit, both Revit target frameworks, updater smoke
+  tests, and release-package validation.
+- Added product-specific release manifests, SHA-256 checksums, GitHub artifact attestations,
+  npm trusted publishing support, and strict tag validation.
+- Added authenticated loopback WebSocket bridges with a shared local bearer
+  token, strict message and timeout limits, bounded document-scoped
+  idempotency caches, and explicit unknown-outcome retry guidance.
+- Added product-prefixed project license and version-specific third-party
+  notices to both binary release archives, with validation against the
+  repository copies and generic-name collision guards.
+- Added `SECURITY.md`, `CONTRIBUTING.md`, CODEOWNERS, Dependabot configuration,
+  and issue and pull request templates.
+
+### Changed
+- npm publishing now builds and publishes `@kimminsub/mcp-cad-core` before
+  `@kimminsub/revit-mcp`; the server depends on the exact matching core
+  version.
+- Revit release archives are assembled from staged runtime output and include
+  Roslyn scripting dependencies, legal notices, and
+  `RevitMCPPlugin.deps.json`, while excluding Revit API reference assemblies.
+- Public binary support is documented as Revit 2025 only; later Revit years
+  require an API-specific build, release asset, and validation before support
+  is claimed.
+- Release publication is gated on all npm, .NET, updater, and archive
+  preflight checks. GitHub Actions are pinned to immutable commit SHAs with
+  job-scoped permissions; every downstream checkout uses the validated commit
+  SHA and publish/finalize steps re-check the remote tag target.
+- Verified archives are uploaded to a draft release before npm publication;
+  the release becomes public only after both exact-version npm packages and
+  their dependency relationship are confirmed.
+- Plugin, commandset, and updater binaries now derive the same version from
+  `v`-prefixed tags. Packaging independently verifies both the plugin DLL and
+  updater EXE file versions before a release can proceed.
+- Revit and AutoCAD write commands now check transaction outcomes, serialize
+  verifiable mutation results, and preserve committed-success responses when a
+  later UI or command-context follow-up fails.
+- Tool schemas now enforce cross-field contracts, bounded batch sizes,
+  64-bit-safe element identifiers, strict cursors, and stable
+  `idempotency_key` forwarding.
+
+### Security
+- Updated production JavaScript dependencies and added an audit gate.
+- Hardened updater extraction against path traversal, path collisions, links,
+  oversized archives, and partial replacement; added malicious-ZIP and backup
+  preservation regression tests.
+- Automatic updates now require the exact GitHub asset name, size, and
+  GitHub-provided SHA-256 digest before extraction, then recheck the archive
+  immediately before installation.
+- `revit_execute_script` is disabled by default, requires explicit enablement
+  and Revit UI approval for every run, and is documented as an escape hatch
+  rather than a security sandbox.
+- Documented the local trust boundary, script-execution risk, confidential
+  model-data handling, and manual release verification process.
+
+---
+
+## [0.5.0] — 2026-04-29
+
+### Added
+- Added Revit selection-aware queries:
+  `revit_get_selected_elements` and `revit_get_element_geometry`.
+- Added AutoCAD selection primitives and schedule parsing tools backed by the
+  shared `@kimminsub/mcp-cad-core` workspace.
+
+### Known issue
+- The Revit GitHub artifacts were published, but the parallel npm job failed
+  while building the newly extracted core workspace. npm therefore remained
+  on `@kimminsub/revit-mcp@0.4.0`.
+
+---
+
+## [0.4.0] — 2026-04-22
+
+### Added
+- Published the TypeScript server to npm for the first time as
+  `@kimminsub/revit-mcp`.
+- Made the npm release job workspace-aware.
+
+---
+
 ## [0.3.0] — 2026-04-22
 
 ### Added
@@ -120,8 +208,8 @@ changes are still fair game.
 ## [0.1.0] — 2026-03-30 (initial commit)
 
 First public tag. 20 tools across Utility / Query / Create / Modify /
-View. No auto-update or Harness Tier 1 scaffolding yet. Tested on a
-396,118-element structural model (`Y1P1_PH1_ST_지원시설-Central`) and on
+View. No auto-update or Harness Tier 1 scaffolding yet. Tested on an
+anonymized structural model with hundreds of thousands of elements and on
 Revit's blank template for create/modify flows.
 
 ### Initial tool set
@@ -136,6 +224,9 @@ Revit's blank template for create/modify flows.
 - View (4): `revit_set_active_view`, `revit_isolate_elements`,
   `revit_reset_view_isolation`, `revit_select_elements`
 
+[Unreleased]: https://github.com/mskim274/revit-mcp-v2/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/mskim274/revit-mcp-v2/releases/tag/v0.5.0
+[0.4.0]: https://github.com/mskim274/revit-mcp-v2/releases/tag/v0.4.0
 [0.3.0]: https://github.com/mskim274/revit-mcp-v2/releases/tag/v0.3.0
 [0.2.0]: https://github.com/mskim274/revit-mcp-v2/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mskim274/revit-mcp-v2/commit/ea036ec

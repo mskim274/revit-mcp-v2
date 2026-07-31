@@ -262,7 +262,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
    25KB 오버플로 스필은 최후 방어선이지 큰 응답의 면죄부가 아니다.
 3. **배치 합성 (Batch-Composable)** — Claude의 작업 패턴은
    query → filter → batch 루프다. N건 작업에 N번 호출을 강요하지 말 것
-   (570번 개별 modify 호출 사고 → `batch_modify_parameters`).
+   (수백 번의 개별 modify 호출이 필요했던 사례 → `batch_modify_parameters`).
    단일 트랜잭션 + per-item 실패 리포팅이 표준.
 4. **재시도 안전 (Retry-Safe)** — 타임아웃 시 Claude는 자동 재시도한다.
    모든 side-effect 도구는 `idempotency_key`를 노출할 것.
@@ -305,7 +305,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 
 ### Multi-target Build
 - `net48` → Revit 2023/2024 (.NET Framework 4.8)
-- `net8.0-windows` → Revit 2025+ (.NET 8.0)
+- `net8.0-windows` → Revit 2025 (.NET 8.0; later years require an API-specific build)
 - Use `<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>` in plugin .csproj for NuGet DLL deployment
 
 ## Sprint Status
@@ -317,11 +317,11 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [x] **Harness Tier 1** (v0.2.0+): idempotency cache, post-tx verification, response overflow spill
 - [x] **Phase P0** (v0.2.0+): GitHub-Releases-based update notification dialog
 - [x] **Phase P1** (v0.3.0+): tag-triggered CI release + one-click auto-install
-- [ ] Phase P2: npm publish the TS server as `@mskim274/revit-mcp`
+- [x] Phase P2: npm publish the TS server as `@kimminsub/revit-mcp`
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (31 tools)
+## Tool Inventory (32 tools)
 
 ### Utility (2)
 - `revit_ping` — Connection health check
@@ -365,11 +365,16 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - `revit_rename_type` — ElementType 이름 변경
 - `revit_change_instance_type` — 인스턴스 타입 재배정 (max 1000, workshared는 batch 10 권장)
 
-### View (4)
+### View (5)
 - `revit_set_active_view` — Switch view (partial name match)
 - `revit_isolate_elements` — Isolate or hide in view
 - `revit_reset_view_isolation` — Reset temporary isolation
 - `revit_select_elements` — UI selection/highlight
+- `revit_duplicate_views` — N개 뷰를 **단일 트랜잭션**으로 복제. `option`: `duplicate`(기본) /
+  `with_detailing`(상세 복제) / `as_dependent`(의존적 복제). `as_dependent`는 평면/천장/단면/입면/
+  면적평면만 가능(3D·드래프팅·범례·일람표·시트 불가) — `CanViewBeDuplicated` 사전 체크로 미지원 뷰는
+  reason과 함께 skip(무성 드롭 없음). `view_ids`/`view_names`(exact→contains, 템플릿 제외) 배치 입력,
+  `name_suffix`(충돌 시 자동 증분), `activate`(첫 새 뷰로 전환), `idempotency_key` 지원.
 
 ### Export (1)
 - `revit_export_schedule` — ViewSchedule (일람표) → JSON and/or CSV (UTF-8 BOM by
@@ -389,7 +394,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 Shared selector helper: `commandset/Helpers/ElementSelector.cs`.
 
 ### Script (1) — 2층 escape hatch (AI-First 원칙 §7)
-- `revit_execute_script` — 임의 C# 코드를 라이브 Document에 실행 (Revit 2025+/net8 전용,
+- `revit_execute_script` — 임의 C# 코드를 라이브 Document에 실행 (Revit 2025/net8 전용,
   net48은 "not supported" 스텁).
   - **전역**: `doc`, `print(object)`, `MmToFt(d)`, `FtToMm(d)`.
     자동 import: System / Collections.Generic / Linq / Autodesk.Revit.DB.
@@ -407,9 +412,9 @@ Shared selector helper: `commandset/Helpers/ElementSelector.cs`.
 ## Tested Models
 
 ### 대형 프로젝트 (Sprint 2 검증)
-- Project: Y1P1_PH1_ST_지원시설-Central_분리됨
-- Revit 2025 (build 25.3.0.46), 396,118 elements
-- Query 8개 전체 검증, 31,347 structural framing 페이지네이션 테스트 완료
+- An anonymized large Revit 2025 structural model
+- Hundreds of thousands of elements
+- Query tools and large structural-framing pagination verified
 - select_elements, isolate_elements, set_active_view 실전 검증
 
 ### 빈 프로젝트 (Sprint 3 검증)
@@ -502,7 +507,8 @@ git push origin v0.4.0
 
 ### Version injection (MinVer)
 
-- `<MinVerTagPrefix>v</MinVerTagPrefix>` in both csprojs — without this,
+- `<MinVerTagPrefix>v</MinVerTagPrefix>` in the plugin, commandset, and
+  updater csprojs — without this,
   MinVer silently ignores tags like `v0.2.0` and falls back to
   `0.0.0-alpha.N`, which shipped a broken v0.2.0 that reported itself
   as 0.0.0 and re-prompted on every Revit start.
@@ -537,7 +543,7 @@ git push origin v0.4.0
 `System.Text.Json`이 `Dictionary<string, object>` 값을 `JsonElement`로 역직렬화함. `ConvertJsonElement()`에서 `JsonValueKind.Array` → `List<object>`, `JsonValueKind.Object` → `Dictionary<string,object>`로 재귀 변환 필수. 누락 시 배열이 문자열 `"[1,2,3]"`으로 전달됨.
 
 ### Structural Framing의 LevelId = -1
-구조 프레이밍(보) 요소는 `LevelId` 프로퍼티가 `-1`(InvalidElementId). 실제 레벨 정보는 "참조 레벨" 파라미터(ElementId) 또는 커스텀 파라미터("SK_FL" 등)에 있음. `level_filter`로 필터링 불가 — `parameter_name`/`parameter_value` 필터 사용해야 함.
+구조 프레이밍(보) 요소는 `LevelId` 프로퍼티가 `-1`(InvalidElementId)일 수 있음. 실제 레벨 정보는 "참조 레벨" 파라미터(ElementId) 또는 프로젝트별 커스텀 파라미터에 있을 수 있음. 이런 경우 `level_filter` 대신 `parameter_name`/`parameter_value` 필터를 사용해야 함.
 
 ### 대형 모델(396K+)에서 전체 요소 순회 타임아웃
 `FilteredElementCollector`로 전체 모델 요소를 수집 후 개별 처리하면 30초 타임아웃 발생. 예: isolate 시 "나머지 전부 hide" 접근법 실패. 해결: Revit 네이티브 API(`IsolateElementsTemporary`) 사용하거나, plugin 레이어에서 UIDocument 통해 처리.
@@ -552,7 +558,7 @@ git push origin v0.4.0
 대형 모델에서 query 응답이 매우 큼 (예: 500+ 타입 목록, 98개 뷰 상세). 항상 `include_properties: false` 기본 사용, 필요시 `limit` 파라미터로 제한. **v0.2.0부터 자동 완화**: 25KB 초과 응답은 자동으로 `%TEMP%\revit-mcp-spill\`에 스필되고 12KB 프리뷰만 반환됨 (`services/response-formatter.ts`).
 
 ### MinVer `TagPrefix` 누락 시 무한 업데이트 루프 (v0.2.0 사고)
-태그를 `v0.2.0` 형식으로 쓰는데 MinVer 기본 설정은 prefix 없음 (`0.2.0`). 양쪽 csproj에 `<MinVerTagPrefix>v</MinVerTagPrefix>` 명시 안 하면 CI 빌드가 태그를 못 찾아 `0.0.0-alpha.N`으로 떨어짐. 결과: 릴리스된 DLL이 자기 자신을 v0.0.0으로 인식 → 매번 업데이트 다이얼로그 표시. **v0.3.0에서 수정됨**. 현재 두 csproj에 명시돼 있음 — 제거하지 말 것.
+태그를 `v0.2.0` 형식으로 쓰는데 MinVer 기본 설정은 prefix 없음 (`0.2.0`). plugin, commandset, updater csproj에 `<MinVerTagPrefix>v</MinVerTagPrefix>`를 명시하지 않으면 CI 빌드가 태그를 못 찾아 `0.0.0-alpha.N`으로 떨어질 수 있음. 결과: 릴리스된 바이너리가 자기 자신을 v0.0.0으로 인식 → 매번 업데이트 다이얼로그 표시. **v0.3.0에서 plugin/commandset이 수정됐고, updater에도 동일 규칙을 적용함.** 세 csproj 모두에서 제거하지 말 것.
 
 ### `Assembly.GetName().Version` ≠ FileVersion (MinVer 0.x pinning)
 MinVer는 바인딩 redirect 호환성 때문에 `AssemblyVersion`을 `major.0.0.0`으로 고정함. 0.x 릴리스에서는 항상 `0.0.0.0`이 됨. **올바른 버전 읽기**는 `FileVersionInfo.GetVersionInfo(asm.Location).FileVersion` 사용. `Application.GetCurrentPluginVersion()` 참조.

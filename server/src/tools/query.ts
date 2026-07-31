@@ -16,7 +16,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { RevitWebSocketClient } from "../services/websocket-client.js";
 import { sendAndFormat } from "../services/response-formatter.js";
-import { clampPageSize } from "../services/pagination.js";
+import { elementIdSchema } from "./shared.js";
 
 // Shared annotations for read-only tools
 const READ_ONLY_ANNOTATIONS = {
@@ -25,6 +25,155 @@ const READ_ONLY_ANNOTATIONS = {
   idempotentHint: true,
   openWorldHint: false,
 } as const;
+
+const QUERY_ELEMENTS_INPUT_SCHEMA = z
+  .object({
+    category: z
+      .string()
+      .trim()
+      .min(1)
+      .describe('Category name: "Walls", "Floors", "StructuralFraming", etc.'),
+    summary_only: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("true = counts only (safe for large models), false = element details"),
+    ids_only: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Return element IDs only (lightweight — default page 5000, max 10000). Overrides summary_only."
+      ),
+    limit: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        "Page size: detail mode 1-200 (default 50), ids_only mode 1-10000 (default 5000)"
+      ),
+    cursor: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "Pagination cursor — pass next_cursor from the previous response (a plain offset number also works)"
+      ),
+    level_filter: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("Filter by level name (exact match)"),
+    type_filter: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("Filter by type name (contains match)"),
+    parameter_name: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("Filter by parameter name"),
+    parameter_value: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Non-empty parameter value to filter by (requires parameter_name). EXACT case-insensitive match by default; use match_mode="empty" for unfilled values.'
+      ),
+    match_mode: z
+      .enum(["exact", "contains", "empty"])
+      .optional()
+      .describe(
+        'Parameter value matching (requires parameter_name): "exact" (default), "contains" (substring), or "empty" (parameter exists but is unfilled; do not also pass parameter_value)'
+      ),
+    group_by_parameter: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "Only with summary_only=true and ids_only=false: also return a value→count distribution for this parameter"
+      ),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const hasParameterName = value.parameter_name !== undefined;
+    const isIdMode = value.ids_only === true;
+    const isSummaryMode = value.summary_only === true && !isIdMode;
+
+    if (value.match_mode !== undefined && !hasParameterName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["match_mode"],
+        message: "match_mode requires parameter_name.",
+      });
+    }
+
+    if (value.parameter_value !== undefined && !hasParameterName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameter_value"],
+        message: "parameter_value requires parameter_name.",
+      });
+    }
+
+    if (value.match_mode === "empty" && value.parameter_value !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameter_value"],
+        message:
+          'parameter_value cannot be combined with match_mode="empty"; omit parameter_value.',
+      });
+    }
+
+    if (
+      value.group_by_parameter !== undefined &&
+      (value.summary_only !== true || value.ids_only !== false)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["group_by_parameter"],
+        message:
+          "group_by_parameter is available only when summary_only=true and ids_only=false.",
+      });
+    }
+
+    if (isSummaryMode) {
+      if (value.limit !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["limit"],
+          message:
+            "limit is available only in detail mode (summary_only=false) or ids_only mode.",
+        });
+      }
+      if (value.cursor !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cursor"],
+          message:
+            "cursor is available only in detail mode (summary_only=false) or ids_only mode.",
+        });
+      }
+    } else if (value.limit !== undefined) {
+      const maximum = isIdMode ? 10_000 : 200;
+      if (value.limit < 1 || value.limit > maximum) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["limit"],
+          message: `limit must be an integer from 1 to ${maximum} in ${
+            isIdMode ? "ids_only" : "detail"
+          } mode.`,
+        });
+      }
+    }
+  });
 
 export function registerQueryTools(
   server: McpServer,
@@ -51,56 +200,10 @@ Examples:
   - Summary: query_elements(category="Walls") → "523 walls: 3 types across 5 levels"
   - Detail: query_elements(category="Walls", summary_only=false, limit=20) → first 20 walls
   - IDs: query_elements(category="Pipes", ids_only=true) → all pipe IDs in one call
-  - Filter: query_elements(category="Pipes", parameter_name="SK_SIZE", parameter_value="50A") → exact 50A only (not 250A)
-  - Empty: query_elements(category="Pipes", parameter_name="SK_SIZE", match_mode="empty") → pipes with SK_SIZE unfilled
-  - Distribution: query_elements(category="Pipes", group_by_parameter="SK_SIZE") → count per SK_SIZE value`,
-      inputSchema: {
-        category: z
-          .string()
-          .describe('Category name: "Walls", "Floors", "StructuralFraming", etc.'),
-        summary_only: z
-          .boolean()
-          .optional()
-          .default(true)
-          .describe("true = counts only (safe for large models), false = element details"),
-        ids_only: z
-          .boolean()
-          .optional()
-          .describe("Return element IDs only (lightweight — default page 5000, max 10000). Overrides summary_only."),
-        limit: z
-          .number()
-          .int()
-          .optional()
-          .describe("Page size: detail mode 1-200 (default 50), ids_only mode 1-10000 (default 5000)"),
-        cursor: z
-          .string()
-          .optional()
-          .describe("Pagination cursor — pass next_cursor from the previous response (a plain offset number also works)"),
-        level_filter: z
-          .string()
-          .optional()
-          .describe("Filter by level name (exact match)"),
-        type_filter: z
-          .string()
-          .optional()
-          .describe("Filter by type name (contains match)"),
-        parameter_name: z
-          .string()
-          .optional()
-          .describe("Filter by parameter name"),
-        parameter_value: z
-          .string()
-          .optional()
-          .describe("Filter by parameter value (requires parameter_name). EXACT case-insensitive match by default — see match_mode."),
-        match_mode: z
-          .enum(["exact", "contains", "empty"])
-          .optional()
-          .describe('Parameter value matching: "exact" (default), "contains" (substring), "empty" (parameter exists but unfilled — ignores parameter_value)'),
-        group_by_parameter: z
-          .string()
-          .optional()
-          .describe("Summary mode only: also return a value→count distribution for this parameter (e.g. SK_SIZE → {250A: 409, D600: 26})"),
-      },
+  - Filter: query_elements(category="Pipes", parameter_name="Size Code", parameter_value="50A") → exact 50A only (not 250A)
+  - Empty: query_elements(category="Pipes", parameter_name="Size Code", match_mode="empty") → pipes with Size Code unfilled
+  - Distribution: query_elements(category="Pipes", group_by_parameter="Size Code") → count per Size Code value`,
+      inputSchema: QUERY_ELEMENTS_INPUT_SCHEMA,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async (params) => {
@@ -108,8 +211,8 @@ Examples:
         category: params.category,
         summary_only: params.summary_only ?? true,
         ids_only: params.ids_only ?? false,
-        limit: params.ids_only ? (params.limit ?? null) : clampPageSize(params.limit),
-        cursor: params.cursor ?? null,
+        limit: params.limit,
+        cursor: params.cursor,
         level_filter: params.level_filter ?? null,
         type_filter: params.type_filter ?? null,
         parameter_name: params.parameter_name ?? null,
@@ -131,7 +234,7 @@ Returns all instance parameters, type parameters, location, bounding box, and me
 
 Use this after revit_query_elements to drill into a specific element.`,
       inputSchema: {
-        element_id: z.number().describe("The Revit element ID (integer)"),
+        element_id: elementIdSchema("The Revit element ID"),
       },
       annotations: READ_ONLY_ANNOTATIONS,
     },
@@ -329,7 +432,11 @@ Element ID resolution: pass element_ids:[123,456,...] explicitly, OR call with n
 
 All distances/areas/volumes are returned in Revit internal feet (1 ft = 304.8 mm). Caps: max_faces default 50, max_edges default 100 per element to prevent response bloat on detailed families.`,
       inputSchema: {
-        element_ids: z.array(z.number().int()).optional()
+        element_ids: z
+          .array(elementIdSchema("Element ID"))
+          .min(1)
+          .max(200)
+          .optional()
           .describe("Explicit list of element IDs. If omitted, uses the current UI selection."),
         detail: z.boolean().optional()
           .describe("Include face/edge/solid detail (heavier). Default false (summary only)."),

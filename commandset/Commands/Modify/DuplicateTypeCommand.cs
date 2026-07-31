@@ -41,7 +41,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         "Missing required parameter: new_name",
                         "Provide a unique name for the new type."));
 
-                var sourceId = Convert.ToInt32(idObj);
+                var sourceId = Convert.ToInt64(idObj);
                 var newName = nameObj.ToString().Trim();
 
                 if (string.IsNullOrEmpty(newName))
@@ -49,13 +49,14 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         "new_name cannot be empty.",
                         "Provide a non-empty type name."));
 
-                var source = doc.GetElement(new ElementId(sourceId)) as ElementType;
+                var source = doc.GetElement(ElementIdCompatibility.Create(sourceId)) as ElementType;
                 if (source == null)
                     return Task.FromResult(CommandResult.Fail(
                         $"Element {sourceId} is not an ElementType (type) — cannot duplicate.",
                         "Pass the ID of a TYPE element (not an instance). Use revit_get_family_types with include_types=true."));
 
                 ElementType duplicated = null;
+                cancellationToken.ThrowIfCancellationRequested();
                 using (var tx = new Transaction(doc, $"MCP: Duplicate type → {newName}"))
                 {
                     tx.Start();
@@ -70,17 +71,38 @@ namespace RevitMCP.CommandSet.Commands.Modify
                             $"Type name '{newName}' already exists or is invalid.",
                             "Choose a unique name. Names must not contain : { } | \\ / < > ? * etc."));
                     }
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
+                }
+
+                var verification = new Dictionary<string, object>();
+                try
+                {
+                    var actual = doc.GetElement(duplicated.Id) as ElementType;
+                    verification["performed"] = true;
+                    verification["exists"] = actual != null;
+                    verification["name_match"] = actual != null
+                        && actual.Name.Equals(newName, StringComparison.Ordinal);
+                    verification["match"] = actual != null
+                        && actual.Name.Equals(newName, StringComparison.Ordinal);
+                }
+                catch (Exception verificationError)
+                {
+                    verification["performed"] = false;
+                    verification["match"] = false;
+                    verification["error"] = verificationError.Message;
                 }
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
                     ["source_type_id"] = sourceId,
                     ["source_type_name"] = source.Name,
-                    ["new_type_id"] = duplicated.Id.IntegerValue,
+                    ["new_type_id"] = duplicated.Id.GetValue(),
                     ["new_type_name"] = duplicated.Name,
                     ["family_name"] = duplicated.FamilyName,
                     ["category"] = duplicated.Category?.Name ?? "(unknown)",
+                    ["mutation_committed"] = true,
+                    ["verification"] = verification,
                 }));
             }
             catch (Exception ex)

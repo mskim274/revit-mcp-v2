@@ -1,0 +1,15 @@
+# Default ownership
+* @mskim274
+
+# Release and supply-chain controls
+/.github/workflows/ @mskim274
+/.github/scripts/ @mskim274
+/package.json @mskim274
+/package-lock.json @mskim274
+/server/package.json @mskim274
+/packages/mcp-cad-core/package.json @mskim274
+
+# Native plugins and updater
+/plugin/ @mskim274
+/commandset/ @mskim274
+/updater/ @mskim274

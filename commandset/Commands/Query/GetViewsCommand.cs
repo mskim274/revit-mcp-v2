@@ -45,7 +45,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                     {
                         var info = new Dictionary<string, object>
                         {
-                            ["id"] = v.Id.IntegerValue,
+                            ["id"] = v.Id.GetValue(),
                             ["name"] = v.Name,
                             ["view_type"] = v.ViewType.ToString(),
                             ["is_template"] = v.IsTemplate,

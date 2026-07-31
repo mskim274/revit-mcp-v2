@@ -9,9 +9,9 @@ using AutoCADMCP.CommandSet.Interfaces;
 namespace AutoCADMCP.CommandSet.Commands
 {
     /// <summary>
-    /// Add a Line entity to model space. First mutation command — proves out
-    /// the write-transaction path, post-tx verification, and the Tier 1
-    /// idempotency cache.
+    /// Add a Line entity to model space. The command reports only a
+    /// provisional in-transaction check; the plugin dispatcher owns the
+    /// transaction and replaces it with post-commit verification.
     ///
     /// Parameters:
     ///   start  — required, [x, y, z] (z optional, defaults to 0)
@@ -35,14 +35,29 @@ namespace AutoCADMCP.CommandSet.Commands
             {
                 var start = ParsePoint(parameters, "start");
                 var end = ParsePoint(parameters, "end");
-                if (start == null) return Fail("'start' is required as [x, y, z].");
-                if (end == null) return Fail("'end' is required as [x, y, z].");
+                if (start == null)
+                    return Fail(
+                        "'start' must contain exactly 2 or 3 finite numbers.");
+                if (end == null)
+                    return Fail(
+                        "'end' must contain exactly 2 or 3 finite numbers.");
                 if (start.Value.DistanceTo(end.Value) < 1e-9)
                     return Fail("Zero-length line — start and end are equal.");
 
                 string layerName = null;
-                if (parameters.TryGetValue("layer", out var lv) && lv is string ls && !string.IsNullOrEmpty(ls))
-                    layerName = ls;
+                if (parameters.TryGetValue("layer", out var layerValue))
+                {
+                    if (!(layerValue is string suppliedLayer) ||
+                        string.IsNullOrWhiteSpace(suppliedLayer))
+                    {
+                        return Fail(
+                            "'layer' must be a non-empty string when supplied.",
+                            "Omit 'layer' to use the current layer, or pass " +
+                            "an exact name from cad_get_layers.");
+                    }
+
+                    layerName = suppliedLayer.Trim();
+                }
 
                 // Validate layer exists if specified.
                 var layerTable = (LayerTable)tr.GetObject(db.LayerTableId, OpenMode.ForRead);
@@ -61,25 +76,33 @@ namespace AutoCADMCP.CommandSet.Commands
                 ms.AppendEntity(line);
                 tr.AddNewlyCreatedDBObject(line, true);
 
-                // Post-transaction verification (Tier 1 harness pattern). The
-                // outer dispatcher commits when this method returns. We can
-                // already query line's properties here — they're set on the
-                // managed object, regardless of commit timing.
+                // Provisional object check only. The dispatcher owns commit
+                // and replaces this block after reopening the ObjectId.
                 var startActual = line.StartPoint;
                 var endActual = line.EndPoint;
+                var preCommitGeometryMatch =
+                    NearlyEqual(startActual, start.Value, 1e-6) &&
+                    NearlyEqual(endActual, end.Value, 1e-6);
                 var verification = new Dictionary<string, object>
                 {
-                    ["performed"] = true,
-                    ["start_match"] = NearlyEqual(startActual, start.Value, 1e-6),
-                    ["end_match"] = NearlyEqual(endActual, end.Value, 1e-6),
+                    ["performed"] = false,
+                    ["phase"] = "pre_commit",
+                    ["provisional"] = true,
+                    ["commit_verified"] = false,
+                    ["pre_commit_geometry_match"] = preCommitGeometryMatch,
                     ["actual_start"] = new[] { startActual.X, startActual.Y, startActual.Z },
                     ["actual_end"] = new[] { endActual.X, endActual.Y, endActual.Z },
                     ["actual_length"] = line.Length,
+                    ["issues"] = new[]
+                    {
+                        "Final verification is pending transaction commit."
+                    },
                 };
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
-                    ["entity_id"] = line.Handle.Value.ToString(),
+                    ["entity_id"] = line.Handle.Value.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture),
                     ["entity_type"] = "Line",
                     ["layer"] = line.Layer,
                     ["verification"] = verification,
@@ -88,7 +111,7 @@ namespace AutoCADMCP.CommandSet.Commands
             catch (System.Exception ex)
             {
                 return Fail($"create_line failed: {ex.Message}",
-                    "Check that 'start' and 'end' are valid [x,y,z] arrays of numbers.");
+                    "Use exactly 2 or 3 finite numbers for each point.");
             }
         }
 
@@ -98,25 +121,47 @@ namespace AutoCADMCP.CommandSet.Commands
         private static Point3d? ParsePoint(Dictionary<string, object> p, string key)
         {
             if (!p.TryGetValue(key, out var v) || v == null) return null;
-            if (v is not List<object> list || list.Count < 2) return null;
+            if (v is not List<object> list ||
+                list.Count < 2 ||
+                list.Count > 3)
+            {
+                return null;
+            }
+
             try
             {
-                double x = ToDouble(list[0]);
-                double y = ToDouble(list[1]);
-                double z = list.Count >= 3 ? ToDouble(list[2]) : 0.0;
+                double x = ToFiniteDouble(list[0]);
+                double y = ToFiniteDouble(list[1]);
+                double z = list.Count == 3
+                    ? ToFiniteDouble(list[2])
+                    : 0.0;
                 return new Point3d(x, y, z);
             }
             catch { return null; }
         }
 
-        private static double ToDouble(object o) => o switch
+        private static double ToFiniteDouble(object value)
         {
-            double d => d,
-            long l => l,
-            int i => i,
-            string s => double.Parse(s, System.Globalization.CultureInfo.InvariantCulture),
-            _ => throw new InvalidCastException($"Cannot convert {o?.GetType().Name} to double"),
-        };
+            var number = value switch
+            {
+                double doubleValue => doubleValue,
+                float floatValue => floatValue,
+                long longValue => longValue,
+                int intValue => intValue,
+                decimal decimalValue => (double)decimalValue,
+                _ => throw new InvalidCastException(
+                    $"Cannot convert {value?.GetType().Name} to double"),
+            };
+
+            if (double.IsNaN(number) || double.IsInfinity(number))
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(value),
+                    "Coordinate must be finite.");
+            }
+
+            return number;
+        }
 
         private static bool NearlyEqual(Point3d a, Point3d b, double tol)
             => Math.Abs(a.X - b.X) <= tol && Math.Abs(a.Y - b.Y) <= tol && Math.Abs(a.Z - b.Z) <= tol;

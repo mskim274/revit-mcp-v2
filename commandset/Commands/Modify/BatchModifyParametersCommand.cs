@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
+using RevitMCP.CommandSet.Helpers;
 using RevitMCP.CommandSet.Interfaces;
 
 namespace RevitMCP.CommandSet.Commands.Modify
@@ -17,7 +18,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
     ///        [{ element_id, parameter_name, value, is_type_param? }, ...]
     ///   B) element_ids (array) + parameters (object) — cross product:
     ///        every name→value pair is applied to every element.
-    ///        (e.g. element_ids=[1,2,3], parameters={"SK_SIZE":"250A","SK_RM":"COM"})
+    ///        (e.g. element_ids=[1,2,3], parameters={"Comments":"Reviewed"})
     ///
     /// Options:
     ///   only_if_empty (bool, default false) — only set parameters that currently
@@ -37,10 +38,14 @@ namespace RevitMCP.CommandSet.Commands.Modify
 
         private sealed class SetRequest
         {
-            public int ElementId;
+            public long ElementId;
             public string ParameterName;
             public object Value;
             public bool IsTypeParam;
+            public string ValueMode;
+            public string ValidationError;
+            public object ExpectedRawValue;
+            public string ExpectedDisplayValue;
         }
 
         public Task<CommandResult> ExecuteAsync(
@@ -50,7 +55,18 @@ namespace RevitMCP.CommandSet.Commands.Modify
         {
             try
             {
-                var onlyIfEmpty = GetBool(parameters, "only_if_empty", false);
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "only_if_empty",
+                        defaultValue: false,
+                        out var onlyIfEmpty,
+                        out var onlyIfEmptyError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        onlyIfEmptyError,
+                        "Pass only_if_empty as true or false, or omit it to use false."));
+                }
+                var defaultValueMode = GetValueMode(parameters, "internal");
 
                 // ─── Build the flat set list from input shape A or B ───
                 var requests = new List<SetRequest>();
@@ -59,8 +75,11 @@ namespace RevitMCP.CommandSet.Commands.Modify
                     && parameters.TryGetValue("modifications", out var modsObj)
                     && modsObj is List<object> mods && mods.Count > 0)
                 {
-                    foreach (var item in mods)
+                    for (var modificationIndex = 0;
+                         modificationIndex < mods.Count;
+                         modificationIndex++)
                     {
+                        var item = mods[modificationIndex];
                         if (!(item is Dictionary<string, object> m))
                             return Task.FromResult(CommandResult.Fail(
                                 "Each entry in 'modifications' must be an object.",
@@ -73,13 +92,26 @@ namespace RevitMCP.CommandSet.Commands.Modify
                                 "A 'modifications' entry is missing element_id, parameter_name, or value.",
                                 "Every entry needs: element_id (int), parameter_name (string), value."));
 
+                        if (!RawParameterValidation.TryGetOptionalStrictBool(
+                                m,
+                                "is_type_param",
+                                defaultValue: false,
+                                out var isTypeParam,
+                                out var isTypeParamError))
+                        {
+                            return Task.FromResult(CommandResult.Fail(
+                                $"modifications[{modificationIndex}]: {isTypeParamError}",
+                                "Pass is_type_param as true or false, or omit it to use false."));
+                        }
+
                         requests.Add(new SetRequest
                         {
-                            ElementId = Convert.ToInt32(eid),
+                            ElementId = Convert.ToInt64(eid),
                             ParameterName = pn.ToString(),
                             Value = val,
-                            IsTypeParam = m.TryGetValue("is_type_param", out var itp)
-                                          && itp != null && Convert.ToBoolean(itp)
+                            IsTypeParam = isTypeParam,
+                            ValueMode = GetValueMode(m, defaultValueMode),
+                            ValidationError = GetValueValidationError(val)
                         });
                     }
                 }
@@ -91,7 +123,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 {
                     foreach (var idObj in ids)
                     {
-                        var eid = Convert.ToInt32(idObj);
+                        var eid = Convert.ToInt64(idObj);
                         foreach (var kv in paramMap)
                         {
                             requests.Add(new SetRequest
@@ -99,7 +131,10 @@ namespace RevitMCP.CommandSet.Commands.Modify
                                 ElementId = eid,
                                 ParameterName = kv.Key,
                                 Value = kv.Value,
-                                IsTypeParam = false
+                                IsTypeParam = false,
+                                ValueMode = defaultValueMode,
+                                ValidationError =
+                                    GetValueValidationError(kv.Value)
                             });
                         }
                     }
@@ -123,7 +158,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 var succeeded = 0;
                 var skippedNotEmpty = 0;
                 var failures = new List<Dictionary<string, object>>();
-                var elementCache = new Dictionary<int, Element>();
+                var elementCache = new Dictionary<long, Element>();
                 SetRequest lastSucceeded = null;
 
                 using (var tx = new Transaction(doc, $"MCP: Batch set {requests.Count} parameters"))
@@ -132,9 +167,9 @@ namespace RevitMCP.CommandSet.Commands.Modify
 
                     foreach (var req in requests)
                     {
-                        // NOTE: no ThrowIfCancellationRequested inside the
-                        // transaction loop — cancelling mid-transaction on
-                        // workshared models causes "operation canceled" churn.
+                        // Cancelling before the next set exits the using scope,
+                        // so the still-open transaction is rolled back on dispose.
+                        cancellationToken.ThrowIfCancellationRequested();
                         var succeededBefore = succeeded;
                         var failure = TryApply(doc, elementCache, req, onlyIfEmpty,
                             ref succeeded, ref skippedNotEmpty);
@@ -144,25 +179,67 @@ namespace RevitMCP.CommandSet.Commands.Modify
                             lastSucceeded = req;
                     }
 
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
                 }
 
                 // ─── Post-transaction verification on the last successful set ───
-                Dictionary<string, object> verification = null;
+                Dictionary<string, object> verification;
                 if (lastSucceeded != null && succeeded > 0)
                 {
-                    var elem = doc.GetElement(new ElementId(lastSucceeded.ElementId));
-                    var target = lastSucceeded.IsTypeParam && elem != null
-                        ? doc.GetElement(elem.GetTypeId())
-                        : elem;
-                    var p = target?.LookupParameter(lastSucceeded.ParameterName);
-                    var actual = p != null ? GetParamDisplayValue(p) : null;
+                    try
+                    {
+                        var elem = doc.GetElement(ElementIdCompatibility.Create(lastSucceeded.ElementId));
+                        var target = lastSucceeded.IsTypeParam && elem != null
+                            ? doc.GetElement(elem.GetTypeId())
+                            : elem;
+                        var p = target?.LookupParameter(lastSucceeded.ParameterName);
+                        var actualDisplay =
+                            p != null ? GetParamDisplayValue(p) : null;
+                        var actualRaw =
+                            p != null ? GetParamRawValue(p) : null;
+                        var match =
+                            p != null &&
+                            ParameterValuesEqual(
+                                lastSucceeded.ExpectedRawValue,
+                                actualRaw);
+                        verification = new Dictionary<string, object>
+                        {
+                            ["performed"] = true,
+                            ["sample_element_id"] = lastSucceeded.ElementId,
+                            ["sample_parameter"] = lastSucceeded.ParameterName,
+                            ["sample_requested_value"] =
+                                lastSucceeded.Value ?? "(null)",
+                            ["sample_expected_display_value"] =
+                                lastSucceeded.ExpectedDisplayValue ?? "(null)",
+                            ["sample_actual_display_value"] =
+                                actualDisplay ?? "(null)",
+                            ["sample_expected_internal_value"] =
+                                lastSucceeded.ExpectedRawValue ?? "(null)",
+                            ["sample_actual_internal_value"] =
+                                actualRaw ?? "(null)",
+                            ["sample_value_mode"] = lastSucceeded.ValueMode,
+                            ["match"] = match
+                        };
+                    }
+                    catch (Exception verificationError)
+                    {
+                        verification = new Dictionary<string, object>
+                        {
+                            ["performed"] = false,
+                            ["match"] = false,
+                            ["error"] = verificationError.Message
+                        };
+                    }
+                }
+                else
+                {
                     verification = new Dictionary<string, object>
                     {
-                        ["performed"] = true,
-                        ["sample_element_id"] = lastSucceeded.ElementId,
-                        ["sample_parameter"] = lastSucceeded.ParameterName,
-                        ["sample_actual_value"] = actual ?? "(null)"
+                        ["performed"] = false,
+                        ["match"] = false,
+                        ["note"] =
+                            "No successful parameter write was available to verify."
                     };
                 }
 
@@ -173,21 +250,22 @@ namespace RevitMCP.CommandSet.Commands.Modify
                     ["skipped_not_empty"] = skippedNotEmpty,
                     ["failed"] = failures.Count,
                     ["only_if_empty"] = onlyIfEmpty,
+                    ["value_mode"] = defaultValueMode,
+                    ["mutation_committed"] = succeeded > 0,
                     // Failures are reported individually; successes only as a count
                     // to keep the response small for large batches.
                     ["failures"] = failures.Take(100).ToList()
                 };
                 if (failures.Count > 100)
                     data["failures_truncated"] = $"{failures.Count - 100} more failures not shown";
-                if (verification != null)
-                    data["verification"] = verification;
+                data["verification"] = verification;
 
                 return Task.FromResult(CommandResult.Ok(data));
             }
             catch (OperationCanceledException)
             {
                 return Task.FromResult(CommandResult.Fail(
-                    "Batch modify was cancelled before the transaction started.",
+                    "Batch modify was cancelled; the transaction was rolled back.",
                     "Retry with a smaller batch."));
             }
             catch (Exception ex)
@@ -204,15 +282,18 @@ namespace RevitMCP.CommandSet.Commands.Modify
         /// </summary>
         private Dictionary<string, object> TryApply(
             Document doc,
-            Dictionary<int, Element> elementCache,
+            Dictionary<long, Element> elementCache,
             SetRequest req,
             bool onlyIfEmpty,
             ref int succeeded,
             ref int skippedNotEmpty)
         {
+            if (!string.IsNullOrEmpty(req.ValidationError))
+                return Failure(req, req.ValidationError);
+
             if (!elementCache.TryGetValue(req.ElementId, out var element))
             {
-                element = doc.GetElement(new ElementId(req.ElementId));
+                element = doc.GetElement(ElementIdCompatibility.Create(req.ElementId));
                 elementCache[req.ElementId] = element;
             }
 
@@ -243,10 +324,23 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 return null;
             }
 
-            if (!SetParameterValue(param, req.Value))
-                return Failure(req,
-                    $"Value type mismatch (storage type: {param.StorageType}).");
+            if (param.StorageType == StorageType.Double &&
+                req.ValueMode == "internal" &&
+                !RawParameterValidation.TryConvertFiniteParameterDouble(
+                    req.Value,
+                    out _))
+            {
+                return Failure(
+                    req,
+                    "Double parameter requires a finite numeric value in internal mode.");
+            }
 
+            if (!SetParameterValue(param, req.Value, req.ValueMode))
+                return Failure(req,
+                    $"Value type mismatch (storage type: {param.StorageType}, value_mode: {req.ValueMode}).");
+
+            req.ExpectedRawValue = GetParamRawValue(param);
+            req.ExpectedDisplayValue = GetParamDisplayValue(param);
             succeeded++;
             return null;
         }
@@ -257,6 +351,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
             {
                 ["element_id"] = req.ElementId,
                 ["parameter_name"] = req.ParameterName,
+                ["value_mode"] = req.ValueMode,
                 ["reason"] = reason
             };
         }
@@ -268,40 +363,58 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 && string.IsNullOrEmpty(param.AsValueString());
         }
 
-        private static bool GetBool(Dictionary<string, object> parameters, string key, bool defaultValue)
+        private static string GetValueValidationError(object value)
         {
-            if (parameters == null || !parameters.TryGetValue(key, out var v) || v == null)
-                return defaultValue;
-            try { return Convert.ToBoolean(v); }
-            catch { return defaultValue; }
+            if (value == null)
+                return "Value must be a string, finite number, or boolean; null is not allowed.";
+            if (RawParameterValidation.IsNonFiniteNumeric(value))
+                return "Value must not be NaN or Infinity.";
+            return null;
         }
 
-        private static bool SetParameterValue(Parameter param, object value)
+        private static string GetValueMode(
+            Dictionary<string, object> parameters,
+            string defaultValue)
+        {
+            var valueMode = parameters != null
+                && parameters.TryGetValue("value_mode", out var raw)
+                && raw != null
+                ? raw.ToString().ToLowerInvariant()
+                : defaultValue;
+            if (valueMode != "internal" && valueMode != "display")
+                throw new ArgumentException(
+                    $"Invalid value_mode '{valueMode}'. Use 'internal' or 'display'.");
+            return valueMode;
+        }
+
+        private static bool SetParameterValue(Parameter param, object value, string valueMode)
         {
             try
             {
                 switch (param.StorageType)
                 {
                     case StorageType.String:
-                        param.Set(value?.ToString() ?? "");
-                        return true;
+                        return param.Set(value?.ToString() ?? "");
 
                     case StorageType.Integer:
+                        if (valueMode == "display")
+                            return param.SetValueString(value?.ToString() ?? "");
                         if (value is bool boolVal)
-                        {
-                            param.Set(boolVal ? 1 : 0);
-                            return true;
-                        }
-                        param.Set(Convert.ToInt32(value));
-                        return true;
+                            return param.Set(boolVal ? 1 : 0);
+                        return param.Set(Convert.ToInt32(value));
 
                     case StorageType.Double:
-                        param.Set(Convert.ToDouble(value));
-                        return true;
+                        if (valueMode == "display")
+                            return param.SetValueString(value?.ToString() ?? "");
+                        if (!RawParameterValidation.TryConvertFiniteParameterDouble(
+                                value,
+                                out var finiteDouble))
+                            return false;
+                        return param.Set(finiteDouble);
 
                     case StorageType.ElementId:
-                        param.Set(new ElementId(Convert.ToInt32(value)));
-                        return true;
+                        if (valueMode == "display") return false;
+                        return param.Set(ElementIdCompatibility.Create(Convert.ToInt64(value)));
 
                     default:
                         return false;
@@ -325,9 +438,44 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 case StorageType.String: return param.AsString();
                 case StorageType.Integer: return param.AsInteger().ToString();
                 case StorageType.Double: return param.AsDouble().ToString("F4");
-                case StorageType.ElementId: return param.AsElementId().IntegerValue.ToString();
+                case StorageType.ElementId: return param.AsElementId().GetValue().ToString();
                 default: return null;
             }
+        }
+
+        private static object GetParamRawValue(Parameter param)
+        {
+            if (!param.HasValue) return null;
+            switch (param.StorageType)
+            {
+                case StorageType.String:
+                    return param.AsString();
+                case StorageType.Integer:
+                    return param.AsInteger();
+                case StorageType.Double:
+                    return param.AsDouble();
+                case StorageType.ElementId:
+                    return param.AsElementId().GetValue();
+                default:
+                    return null;
+            }
+        }
+
+        private static bool ParameterValuesEqual(object expected, object actual)
+        {
+            if (expected == null || actual == null)
+                return expected == null && actual == null;
+
+            if (expected is double expectedDouble &&
+                actual is double actualDouble)
+            {
+                var tolerance = Math.Max(
+                    1e-9,
+                    Math.Abs(expectedDouble) * 1e-9);
+                return Math.Abs(expectedDouble - actualDouble) <= tolerance;
+            }
+
+            return Equals(expected, actual);
         }
     }
 }

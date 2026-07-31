@@ -80,5 +80,13 @@ namespace RevitMCP.Plugin.Services
 
         [JsonPropertyName("content_type")]
         public string ContentType { get; set; }
+
+        /// <summary>
+        /// GitHub-computed asset digest, currently formatted as
+        /// "sha256:&lt;lowercase-hex&gt;". Auto-install is disabled when a
+        /// supported digest is absent so downloads are never trusted blindly.
+        /// </summary>
+        [JsonPropertyName("digest")]
+        public string Digest { get; set; }
     }
 }

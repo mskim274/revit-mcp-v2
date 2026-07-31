@@ -32,7 +32,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                         var curve = g.Curve;
                         var info = new Dictionary<string, object>
                         {
-                            ["id"] = g.Id.IntegerValue,
+                            ["id"] = g.Id.GetValue(),
                             ["name"] = g.Name
                         };
 

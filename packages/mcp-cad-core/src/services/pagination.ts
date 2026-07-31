@@ -12,19 +12,46 @@ export function clampPageSize(requested?: number): number {
   return Math.min(requested, MAX_PAGE_SIZE);
 }
 
-// Cursor format: base64-encoded "offset:<number>"
+export class CursorValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CursorValidationError";
+  }
+}
+
+// Cursor format: base64-encoded "offset:<number>". Plain non-negative integer
+// offsets are also accepted as a documented debugging/recovery escape hatch.
+// Invalid cursors must never silently restart from page one.
 export function parseCursor(cursor?: string | null): number {
   if (!cursor) return 0;
+
+  if (/^\d+$/.test(cursor)) {
+    return parseSafeOffset(cursor, cursor);
+  }
+
   try {
+    if (
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(cursor) ||
+      cursor.length % 4 !== 0
+    ) {
+      throw new Error("not canonical base64");
+    }
     const decoded = Buffer.from(cursor, "base64").toString("utf-8");
     const match = decoded.match(/^offset:(\d+)$/);
-    return match ? parseInt(match[1], 10) : 0;
-  } catch {
-    return 0;
+    if (!match) throw new Error("decoded value is not offset:N");
+    return parseSafeOffset(match[1], cursor);
+  } catch (error) {
+    if (error instanceof CursorValidationError) throw error;
+    throw new CursorValidationError(
+      `Invalid pagination cursor '${cursor}'. Pass next_cursor from the previous response or a non-negative integer offset.`
+    );
   }
 }
 
 export function createCursor(offset: number): string {
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new RangeError("Cursor offset must be a non-negative safe integer.");
+  }
   return Buffer.from(`offset:${offset}`).toString("base64");
 }
 
@@ -88,4 +115,14 @@ export function formatPaginatedResult<T>(
   }
 
   return lines.join("\n");
+}
+
+function parseSafeOffset(value: string, originalCursor: string): number {
+  const offset = Number(value);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new CursorValidationError(
+      `Pagination cursor '${originalCursor}' contains an out-of-range offset.`
+    );
+  }
+  return offset;
 }

@@ -38,15 +38,20 @@ namespace RevitMCP.CommandSet.Commands.View
                     return Task.FromResult(CommandResult.Fail(
                         "No valid element IDs provided.",
                         "Use revit_query_elements to find element IDs."));
+                if (elementIds.Count > 500)
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Too many element IDs: {elementIds.Count} (max 500).",
+                        "Select in batches of at most 500 elements."));
 
                 // Validate elements exist and collect info
-                var validIds = new List<int>();
+                var validIds = new List<long>();
+                var invalidIds = new List<long>();
                 var elementInfos = new List<Dictionary<string, object>>();
 
                 foreach (var id in elementIds)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var elem = doc.GetElement(new ElementId(id));
+                    var elem = doc.GetElement(ElementIdCompatibility.Create(id));
                     if (elem != null)
                     {
                         validIds.Add(id);
@@ -56,6 +61,10 @@ namespace RevitMCP.CommandSet.Commands.View
                             ["name"] = elem.Name ?? "",
                             ["category"] = elem.Category?.Name ?? "Unknown"
                         });
+                    }
+                    else
+                    {
+                        invalidIds.Add(id);
                     }
                 }
 
@@ -68,6 +77,9 @@ namespace RevitMCP.CommandSet.Commands.View
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
                     ["action"] = "select_elements",
+                    ["requested_count"] = elementIds.Count,
+                    ["valid_count"] = validIds.Count,
+                    ["invalid_ids"] = invalidIds,
                     ["selected_count"] = validIds.Count,
                     ["element_ids"] = validIds,
                     ["elements"] = elementInfos
@@ -86,30 +98,36 @@ namespace RevitMCP.CommandSet.Commands.View
             }
         }
 
-        private List<int> ParseElementIds(object idsObj)
+        private List<long> ParseElementIds(object idsObj)
         {
-            var result = new List<int>();
+            var result = new List<long>();
             if (idsObj is IEnumerable<object> enumerable)
             {
                 foreach (var item in enumerable)
                 {
-                    if (item != null && int.TryParse(item.ToString(), out var id))
-                        result.Add(id);
+                    if (item == null || !long.TryParse(item.ToString(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{item}'.");
+                    result.Add(id);
                 }
             }
             else if (idsObj is string str)
             {
                 foreach (var part in str.Split(','))
                 {
-                    if (int.TryParse(part.Trim(), out var id))
-                        result.Add(id);
+                    if (!long.TryParse(part.Trim(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{part}'.");
+                    result.Add(id);
                 }
             }
-            else if (int.TryParse(idsObj?.ToString(), out var singleId))
+            else if (long.TryParse(idsObj?.ToString(), out var singleId) && singleId > 0)
             {
                 result.Add(singleId);
             }
-            return result;
+            else
+            {
+                throw new ArgumentException("element_ids must contain positive integer element IDs.");
+            }
+            return result.Distinct().ToList();
         }
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
+using RevitMCP.CommandSet.Helpers;
 using RevitMCP.CommandSet.Interfaces;
 
 namespace RevitMCP.CommandSet.Commands.Modify
@@ -35,7 +36,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         "Missing required parameter: element_id",
                         "Provide the Revit element ID. Use revit_query_elements to find element IDs."));
 
-                var elementId = Convert.ToInt32(eidObj);
+                var elementId = Convert.ToInt64(eidObj);
 
                 if (!parameters.TryGetValue("parameter_name", out var pnObj) || pnObj == null)
                     return Task.FromResult(CommandResult.Fail(
@@ -44,15 +45,37 @@ namespace RevitMCP.CommandSet.Commands.Modify
 
                 var paramName = pnObj.ToString();
 
-                if (!parameters.TryGetValue("value", out var valueObj))
+                if (!parameters.TryGetValue("value", out var valueObj) ||
+                    valueObj == null)
                     return Task.FromResult(CommandResult.Fail(
-                        "Missing required parameter: value",
-                        "Provide the new value for the parameter."));
+                        "Missing or null required parameter: value",
+                        "Provide a string, finite number, or boolean value."));
+                if (RawParameterValidation.IsNonFiniteNumeric(valueObj))
+                    return Task.FromResult(CommandResult.Fail(
+                        "value must not be NaN or Infinity.",
+                        "Provide a finite numeric value."));
 
-                var isTypeParam = parameters.TryGetValue("is_type_param", out var itpObj) && Convert.ToBoolean(itpObj);
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "is_type_param",
+                        defaultValue: false,
+                        out var isTypeParam,
+                        out var isTypeParamError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        isTypeParamError,
+                        "Pass is_type_param as true or false, or omit it to use false."));
+                }
+                var valueMode = parameters.TryGetValue("value_mode", out var vmObj) && vmObj != null
+                    ? vmObj.ToString().ToLowerInvariant()
+                    : "internal";
+                if (valueMode != "internal" && valueMode != "display")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Invalid value_mode '{valueMode}'.",
+                        "Use value_mode=\"internal\" for raw Revit storage values or \"display\" for a unit-formatted value."));
 
                 // Get element
-                var element = doc.GetElement(new ElementId(elementId));
+                var element = doc.GetElement(ElementIdCompatibility.Create(elementId));
                 if (element == null)
                     return Task.FromResult(CommandResult.Fail(
                         $"Element with ID {elementId} not found.",
@@ -87,13 +110,28 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         $"Parameter '{paramName}' is read-only.",
                         "This parameter cannot be modified. Check for an equivalent writable parameter."));
 
+                object valueToSet = valueObj;
+                if (param.StorageType == StorageType.Double &&
+                    valueMode == "internal")
+                {
+                    if (!RawParameterValidation.TryConvertFiniteParameterDouble(
+                            valueObj,
+                            out var finiteDouble))
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            $"Parameter '{paramName}' requires a finite numeric value in internal mode.",
+                            "Pass a finite number, or use value_mode=\"display\" with a valid Revit-formatted value."));
+                    }
+                    valueToSet = finiteDouble;
+                }
+
                 // Execute in transaction
                 using (var tx = new Transaction(doc, $"MCP: Set {paramName}"))
                 {
                     tx.Start();
 
                     var oldValue = GetParamDisplayValue(param);
-                    bool success = SetParameterValue(param, valueObj);
+                    bool success = SetParameterValue(param, valueToSet, valueMode);
 
                     if (!success)
                     {
@@ -103,9 +141,23 @@ namespace RevitMCP.CommandSet.Commands.Modify
                             $"Parameter storage type is {param.StorageType}. Provide a compatible value."));
                     }
 
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
 
                     var newValue = GetParamDisplayValue(param);
+                    var verification = new Dictionary<string, object>();
+                    try
+                    {
+                        verification["performed"] = true;
+                        verification["set_returned_true"] = true;
+                        verification["actual_display_value"] = newValue ?? "(null)";
+                        verification["actual_internal_value"] = GetParamRawValue(param) ?? "(null)";
+                    }
+                    catch (Exception verificationError)
+                    {
+                        verification["performed"] = false;
+                        verification["error"] = verificationError.Message;
+                    }
 
                     return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                     {
@@ -114,7 +166,10 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         ["old_value"] = oldValue ?? "(null)",
                         ["new_value"] = newValue ?? "(null)",
                         ["storage_type"] = param.StorageType.ToString(),
-                        ["is_type_parameter"] = isTypeParam
+                        ["is_type_parameter"] = isTypeParam,
+                        ["value_mode"] = valueMode,
+                        ["mutation_committed"] = true,
+                        ["verification"] = verification
                     }));
                 }
             }
@@ -132,32 +187,34 @@ namespace RevitMCP.CommandSet.Commands.Modify
             }
         }
 
-        private bool SetParameterValue(Parameter param, object value)
+        private bool SetParameterValue(Parameter param, object value, string valueMode)
         {
             try
             {
                 switch (param.StorageType)
                 {
                     case StorageType.String:
-                        param.Set(value?.ToString() ?? "");
-                        return true;
+                        return param.Set(value?.ToString() ?? "");
 
                     case StorageType.Integer:
+                        if (valueMode == "display")
+                            return param.SetValueString(value?.ToString() ?? "");
                         if (value is bool boolVal)
-                        {
-                            param.Set(boolVal ? 1 : 0);
-                            return true;
-                        }
-                        param.Set(Convert.ToInt32(value));
-                        return true;
+                            return param.Set(boolVal ? 1 : 0);
+                        return param.Set(Convert.ToInt32(value));
 
                     case StorageType.Double:
-                        param.Set(Convert.ToDouble(value));
-                        return true;
+                        if (valueMode == "display")
+                            return param.SetValueString(value?.ToString() ?? "");
+                        if (!RawParameterValidation.TryConvertFiniteParameterDouble(
+                                value,
+                                out var finiteDouble))
+                            return false;
+                        return param.Set(finiteDouble);
 
                     case StorageType.ElementId:
-                        param.Set(new ElementId(Convert.ToInt32(value)));
-                        return true;
+                        if (valueMode == "display") return false;
+                        return param.Set(ElementIdCompatibility.Create(Convert.ToInt64(value)));
 
                     default:
                         return false;
@@ -181,7 +238,20 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 case StorageType.String: return param.AsString();
                 case StorageType.Integer: return param.AsInteger().ToString();
                 case StorageType.Double: return param.AsDouble().ToString("F4");
-                case StorageType.ElementId: return param.AsElementId().IntegerValue.ToString();
+                case StorageType.ElementId: return param.AsElementId().GetValue().ToString();
+                default: return null;
+            }
+        }
+
+        private static object GetParamRawValue(Parameter param)
+        {
+            if (!param.HasValue) return null;
+            switch (param.StorageType)
+            {
+                case StorageType.String: return param.AsString();
+                case StorageType.Integer: return param.AsInteger();
+                case StorageType.Double: return param.AsDouble();
+                case StorageType.ElementId: return param.AsElementId().GetValue();
                 default: return null;
             }
         }

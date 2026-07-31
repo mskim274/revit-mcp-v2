@@ -25,13 +25,31 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
+.npmrc
+
+# Private keys and signing material
+*.key
+*.pem
+*.p12
+*.pfx
 
 # Build artifacts
 *.nupkg
 updater/publish/
+/.artifacts/
 
 # Claude Code session state (local-only)
 .claude/
+
+# Local agent context may contain project/client details. Public guidance is
+# maintained in CLAUDE.md and CONTRIBUTING.md.
+/AGENTS.md
+
+# Local project/customer-specific working files (never publish)
+/.local/
 
 # Ad-hoc working files / scratch exports
 # (Data dumps, DAX/M expression drafts, generated TMDL — not source)

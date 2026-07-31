@@ -1,8 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
@@ -10,150 +10,151 @@ using System.Threading.Tasks;
 namespace RevitMCP.Plugin.Services
 {
     /// <summary>
-    /// Checks GitHub Releases for a newer plugin version and manages
-    /// local snooze state (the "don't show today" checkbox).
-    ///
-    /// Harness Engineering:
-    /// - Fail-safe: network/filesystem errors are caught and logged.
-    ///   An update check must NEVER prevent the plugin from starting.
-    /// - Idempotent: calling CheckAsync multiple times is safe; only the
-    ///   first network call hits GitHub within a single process lifetime.
-    /// - Quiet fallback: when offline, we stay silent rather than nagging.
+    /// Checks the latest stable GitHub release and selects only the assets
+    /// that exactly match the running Revit year and release version.
+    /// Auto-install is offered only when both assets include valid SHA-256
+    /// digests supplied by GitHub.
     /// </summary>
-    internal sealed class UpdateChecker
+    internal sealed class UpdateChecker : IDisposable
     {
-        // Target framework → Revit year mapping. Used to pick the right
-        // release asset (plugin zips are suffixed with "-Revit<year>").
-#if NET48
-        public const string RevitYear    = "2023";
-        public const string RevitYearTag = "Revit2023";
-#else
-        public const string RevitYear    = "2025";
-        public const string RevitYearTag = "Revit2025";
-#endif
-
-
         private readonly string _owner;
         private readonly string _repo;
         private readonly Version _currentVersion;
         private readonly HttpClient _http;
         private readonly string _cachePath;
+        private readonly object _checkLock = new object();
+        private Task<bool> _checkTask;
+        private bool _disposed;
 
-        /// <summary>The version discovered on GitHub (e.g., "0.3.0").</summary>
+        public string RevitYear { get; }
+        public string RevitYearTag => "Revit" + RevitYear;
         public string LatestVersion { get; private set; }
-
-        /// <summary>Release tag (e.g., "v0.2.0") — preserves any leading 'v'.</summary>
         public string LatestTag { get; private set; }
-
-        /// <summary>HTML link to the release notes page.</summary>
         public string ReleaseNotesUrl { get; private set; }
-
-        /// <summary>
-        /// Direct download URL for the plugin zip matching the current
-        /// Revit year (e.g., RevitMCPPlugin-0.2.0-Revit2025.zip).
-        /// </summary>
         public string PluginZipUrl { get; private set; }
-
-        /// <summary>
-        /// Direct download URL for the standalone updater zip
-        /// (RevitMCPUpdater-0.2.0.zip). Required for auto-install flow.
-        /// </summary>
         public string UpdaterZipUrl { get; private set; }
-
-        /// <summary>
-        /// Legacy alias for PluginZipUrl — preserved so earlier UI code
-        /// opening the "Download" link in a browser still works.
-        /// </summary>
+        public string PluginZipSha256 { get; private set; }
+        public string UpdaterZipSha256 { get; private set; }
+        public long PluginZipSize { get; private set; }
+        public long UpdaterZipSize { get; private set; }
         public string DownloadUrl => PluginZipUrl;
-
-        /// <summary>Human-readable release title (falls back to tag).</summary>
         public string ReleaseTitle { get; private set; }
-
-        /// <summary>The current running plugin version, exposed for the UI.</summary>
         public string CurrentVersionText { get; }
 
-        public UpdateChecker(string owner, string repo, Version currentVersion)
+        public UpdateChecker(
+            string owner,
+            string repo,
+            Version currentVersion,
+            string revitYear)
         {
+            if (string.IsNullOrWhiteSpace(owner))
+                throw new ArgumentException("Repository owner is required.", nameof(owner));
+            if (string.IsNullOrWhiteSpace(repo))
+                throw new ArgumentException("Repository name is required.", nameof(repo));
+            if (!IsFourDigitYear(revitYear))
+                throw new ArgumentException(
+                    "The running Revit year must contain exactly four digits.",
+                    nameof(revitYear));
+
             _owner = owner;
             _repo = repo;
             _currentVersion = currentVersion ?? new Version(0, 0, 0, 0);
+            RevitYear = revitYear;
             CurrentVersionText = _currentVersion.ToString(3);
 
             _http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
             _http.DefaultRequestHeaders.UserAgent.ParseAdd(
                 $"revit-mcp-v2/{CurrentVersionText} (+https://github.com/{owner}/{repo})");
             _http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            _http.DefaultRequestHeaders.TryAddWithoutValidation(
+                "X-GitHub-Api-Version",
+                "2022-11-28");
 
-            var cacheDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            var cacheDirectory = Path.Combine(
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData),
                 "RevitMCP");
-            Directory.CreateDirectory(cacheDir);
-            _cachePath = Path.Combine(cacheDir, "update-cache.json");
+            Directory.CreateDirectory(cacheDirectory);
+            _cachePath = Path.Combine(cacheDirectory, "update-cache.json");
         }
 
         /// <summary>
-        /// Returns true if an update is available and the user has not
-        /// snoozed notifications for today. All exceptions are swallowed
-        /// (logged) so the caller can fire-and-forget.
+        /// Process-wide instance single-flight: repeated callers share the same
+        /// check task rather than racing GitHub or mutating discovery state.
         /// </summary>
-        public async Task<bool> CheckAsync()
+        public Task<bool> CheckAsync()
+        {
+            lock (_checkLock)
+            {
+                if (_disposed)
+                    throw new ObjectDisposedException(nameof(UpdateChecker));
+                return _checkTask ??= CheckCoreAsync();
+            }
+        }
+
+        private async Task<bool> CheckCoreAsync()
         {
             try
             {
                 if (IsSnoozed())
                 {
                     System.Diagnostics.Debug.WriteLine(
-                        "[RevitMCP.Update] Snoozed — skipping check.");
+                        "[RevitMCP.Update] Snoozed; skipping check.");
                     return false;
                 }
 
-                var url = $"https://api.github.com/repos/{_owner}/{_repo}/releases/latest";
+                var url =
+                    $"https://api.github.com/repos/{_owner}/{_repo}/releases/latest";
                 var json = await _http.GetStringAsync(url).ConfigureAwait(false);
-
-                var release = JsonSerializer.Deserialize<GitHubRelease>(json,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                var release = JsonSerializer.Deserialize<GitHubRelease>(
+                    json,
+                    new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
 
                 if (release == null || release.Draft || release.Prerelease)
                     return false;
-
                 if (!TryParseTag(release.TagName, out var latest))
                     return false;
-
                 if (latest <= _currentVersion)
                     return false;
 
-                LatestVersion = latest.ToString(3);
+                var versionText = latest.ToString(3);
+                var expectedPluginName =
+                    $"RevitMCPPlugin-{versionText}-Revit{RevitYear}.zip";
+                var expectedUpdaterName =
+                    $"RevitMCPUpdater-{versionText}.zip";
+
+                var pluginAsset = FindExactAsset(
+                    release.Assets,
+                    expectedPluginName);
+                var updaterAsset = FindExactAsset(
+                    release.Assets,
+                    expectedUpdaterName);
+
+                if (!IsUsableAsset(pluginAsset, out var pluginDigest) ||
+                    !IsUsableAsset(updaterAsset, out var updaterDigest))
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[RevitMCP.Update] Release {release.TagName} does not " +
+                        $"contain digest-protected exact assets " +
+                        $"'{expectedPluginName}' and '{expectedUpdaterName}'.");
+                    return false;
+                }
+
+                LatestVersion = versionText;
                 LatestTag = release.TagName;
                 ReleaseNotesUrl = release.HtmlUrl;
                 ReleaseTitle = !string.IsNullOrWhiteSpace(release.Name)
                     ? release.Name
                     : release.TagName;
-
-                // Separate the two asset types our release workflow publishes:
-                //   (1) Plugin zip matching the running Revit year
-                //       e.g., RevitMCPPlugin-0.2.0-Revit2025.zip
-                //   (2) Updater zip (no year suffix)
-                //       e.g., RevitMCPUpdater-0.2.0.zip
-                //
-                // If the plugin zip for our year isn't present we fall back
-                // to any plugin zip, then to the release HTML URL.
-                var pluginAsset =
-                    FindAsset(release.Assets, a =>
-                        a.Name != null &&
-                        a.Name.IndexOf(RevitYearTag, StringComparison.OrdinalIgnoreCase) >= 0 &&
-                        a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                    ?? FindAsset(release.Assets, a =>
-                        a.Name != null &&
-                        a.Name.StartsWith("RevitMCPPlugin-", StringComparison.OrdinalIgnoreCase) &&
-                        a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
-
-                var updaterAsset = FindAsset(release.Assets, a =>
-                    a.Name != null &&
-                    a.Name.StartsWith("RevitMCPUpdater-", StringComparison.OrdinalIgnoreCase) &&
-                    a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
-
-                PluginZipUrl  = pluginAsset?.DownloadUrl ?? release.HtmlUrl;
-                UpdaterZipUrl = updaterAsset?.DownloadUrl;
+                PluginZipUrl = pluginAsset.DownloadUrl;
+                UpdaterZipUrl = updaterAsset.DownloadUrl;
+                PluginZipSha256 = pluginDigest;
+                UpdaterZipSha256 = updaterDigest;
+                PluginZipSize = pluginAsset.Size;
+                UpdaterZipSize = updaterAsset.Size;
                 return true;
             }
             catch (Exception ex)
@@ -164,10 +165,6 @@ namespace RevitMCP.Plugin.Services
             }
         }
 
-        /// <summary>
-        /// Persist "don't show again today" state so we don't re-prompt on
-        /// the next Revit start within the same calendar day.
-        /// </summary>
         public void SnoozeForToday()
         {
             try
@@ -185,7 +182,15 @@ namespace RevitMCP.Plugin.Services
             }
         }
 
-        // ─── Internals ────────────────────────────────────────────────────
+        public void Dispose()
+        {
+            lock (_checkLock)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _http.Dispose();
+            }
+        }
 
         private bool IsSnoozed()
         {
@@ -197,51 +202,112 @@ namespace RevitMCP.Plugin.Services
         {
             try
             {
-                if (!File.Exists(_cachePath)) return new UpdateCache();
+                if (!File.Exists(_cachePath))
+                    return new UpdateCache();
                 var json = File.ReadAllText(_cachePath);
-                return JsonSerializer.Deserialize<UpdateCache>(json) ?? new UpdateCache();
+                return JsonSerializer.Deserialize<UpdateCache>(json)
+                       ?? new UpdateCache();
             }
             catch
             {
-                // Corrupt cache file → start fresh; never propagate.
                 return new UpdateCache();
             }
         }
 
         private void SaveCache(UpdateCache cache)
         {
-            var json = JsonSerializer.Serialize(cache,
+            var json = JsonSerializer.Serialize(
+                cache,
                 new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_cachePath, json);
+            var temporaryPath = _cachePath + ".tmp";
+            File.WriteAllText(temporaryPath, json);
+
+            if (File.Exists(_cachePath))
+            {
+                var backupPath = _cachePath + ".bak";
+                File.Replace(temporaryPath, _cachePath, backupPath);
+            }
+            else
+            {
+                File.Move(temporaryPath, _cachePath);
+            }
         }
 
-        /// <summary>
-        /// Linear-scan helper for picking a GitHub release asset that
-        /// satisfies a predicate. Kept tiny so it inlines cleanly.
-        /// </summary>
-        private static GitHubAsset FindAsset(
-            System.Collections.Generic.List<GitHubAsset> assets,
-            Func<GitHubAsset, bool> predicate)
+        private static GitHubAsset FindExactAsset(
+            IEnumerable<GitHubAsset> assets,
+            string expectedName)
         {
-            if (assets == null) return null;
-            foreach (var a in assets)
-                if (a != null && predicate(a)) return a;
-            return null;
+            return assets?.FirstOrDefault(asset =>
+                asset != null &&
+                string.Equals(
+                    asset.Name,
+                    expectedName,
+                    StringComparison.OrdinalIgnoreCase));
         }
 
-        /// <summary>
-        /// Parse a GitHub tag like "v0.2.0" or "0.2.0" into a Version.
-        /// Returns false for malformed or missing tags.
-        /// </summary>
+        private static bool IsUsableAsset(
+            GitHubAsset asset,
+            out string sha256)
+        {
+            sha256 = null;
+            return asset != null &&
+                   asset.Size > 0 &&
+                   IsHttpsUrl(asset.DownloadUrl) &&
+                   TryParseSha256Digest(asset.Digest, out sha256);
+        }
+
+        private static bool IsHttpsUrl(string value)
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+                   string.Equals(
+                       uri.Scheme,
+                       Uri.UriSchemeHttps,
+                       StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TryParseSha256Digest(
+            string digest,
+            out string sha256)
+        {
+            sha256 = null;
+            if (string.IsNullOrWhiteSpace(digest))
+                return false;
+
+            const string prefix = "sha256:";
+            var trimmed = digest.Trim();
+            if (!trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var value = trimmed.Substring(prefix.Length);
+            if (value.Length != 64 || value.Any(character =>
+                    !((character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f') ||
+                      (character >= 'A' && character <= 'F'))))
+            {
+                return false;
+            }
+
+            sha256 = value.ToLowerInvariant();
+            return true;
+        }
+
         private static bool TryParseTag(string tag, out Version version)
         {
             version = null;
-            if (string.IsNullOrWhiteSpace(tag)) return false;
+            if (string.IsNullOrWhiteSpace(tag))
+                return false;
             var trimmed = tag.TrimStart('v', 'V').Trim();
             return Version.TryParse(trimmed, out version);
         }
 
-        private class UpdateCache
+        private static bool IsFourDigitYear(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   value.Length == 4 &&
+                   value.All(character => character >= '0' && character <= '9');
+        }
+
+        private sealed class UpdateCache
         {
             [JsonPropertyName("last_check_utc")]
             public DateTime LastCheckUtc { get; set; }

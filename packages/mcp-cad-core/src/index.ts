@@ -6,6 +6,7 @@ export * from "./constants.js";
 export {
   CadWebSocketClient,
   type CadWebSocketClientConfig,
+  type CommandExecutionOptions,
 } from "./services/websocket-client.js";
 export {
   createResponseFormatter,
@@ -13,6 +14,7 @@ export {
 } from "./services/response-formatter.js";
 export {
   clampPageSize,
+  CursorValidationError,
   parseCursor,
   createCursor,
   buildPaginatedResult,

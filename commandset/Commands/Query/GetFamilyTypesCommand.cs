@@ -69,7 +69,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                 {
                     var info = new Dictionary<string, object>
                     {
-                        ["id"] = f.Id.IntegerValue,
+                        ["id"] = f.Id.GetValue(),
                         ["name"] = f.Name,
                         ["category"] = f.FamilyCategory?.Name ?? "Unknown",
                         ["is_in_place"] = f.IsInPlace,
@@ -87,7 +87,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                                 .OrderBy(s => s.Name)
                                 .Select(s => new Dictionary<string, object>
                                 {
-                                    ["id"] = s.Id.IntegerValue,
+                                    ["id"] = s.Id.GetValue(),
                                     ["name"] = s.Name,
                                     ["is_active"] = s.IsActive
                                 })

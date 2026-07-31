@@ -52,30 +52,110 @@ namespace RevitMCP.CommandSet.Commands.Query
 
                 var summaryOnly = GetParam<bool>(parameters, "summary_only", true);
                 var idsOnly = GetParam<bool>(parameters, "ids_only", false);
-                var limit = GetParam<int>(parameters, "limit", 0);
-                var cursor = GetParam<string>(parameters, "cursor", null);
-                var levelFilter = GetParam<string>(parameters, "level_filter", null);
-                var typeFilter = GetParam<string>(parameters, "type_filter", null);
+                if (!TryGetOptionalInteger(
+                        parameters,
+                        "limit",
+                        out var hasLimit,
+                        out var limit,
+                        out var limitError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        limitError,
+                        "Use an integer page size in the documented range, or omit limit to use the mode default."));
+                }
+                if (!TryGetOptionalTrimmedString(
+                        parameters,
+                        "cursor",
+                        out var hasCursor,
+                        out var cursor,
+                        out var cursorError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        cursorError,
+                        "Pass the exact next_cursor from the previous response, a non-negative integer string, or omit cursor."));
+                }
+                if (!TryGetOptionalNonBlankString(
+                        parameters,
+                        "level_filter",
+                        out var levelFilter,
+                        out var levelFilterError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        levelFilterError,
+                        "Provide a non-empty level name, or omit level_filter."));
+                }
+                if (!TryGetOptionalNonBlankString(
+                        parameters,
+                        "type_filter",
+                        out var typeFilter,
+                        out var typeFilterError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        typeFilterError,
+                        "Provide a non-empty type-name substring, or omit type_filter."));
+                }
                 var parameterName = GetParam<string>(parameters, "parameter_name", null);
-                var parameterValue = GetParam<string>(parameters, "parameter_value", null);
+                if (!TryGetOptionalNonBlankString(
+                        parameters,
+                        "parameter_value",
+                        out var parameterValue,
+                        out var parameterValueError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        parameterValueError,
+                        "Provide a non-empty parameter_value, or use match_mode='empty' to find unfilled values."));
+                }
                 var matchMode = (GetParam<string>(parameters, "match_mode", "exact") ?? "exact").ToLowerInvariant();
                 var groupByParameter = GetParam<string>(parameters, "group_by_parameter", null);
+                var hasParameterName = !string.IsNullOrWhiteSpace(parameterName);
+                var hasParameterValue = parameterValue != null;
+                var hasExplicitMatchMode = HasNonNullParameter(parameters, "match_mode");
+                var hasGroupByParameter = !string.IsNullOrWhiteSpace(groupByParameter);
 
                 if (matchMode != "exact" && matchMode != "contains" && matchMode != "empty")
                     return Task.FromResult(CommandResult.Fail(
                         $"Invalid match_mode: '{matchMode}'",
                         "Use one of: 'exact' (default), 'contains', 'empty'."));
+                if (hasExplicitMatchMode && !hasParameterName)
+                    return Task.FromResult(CommandResult.Fail(
+                        "match_mode requires parameter_name.",
+                        "Provide parameter_name when setting match_mode, or omit match_mode to use the default."));
+                if (hasParameterValue && !hasParameterName)
+                    return Task.FromResult(CommandResult.Fail(
+                        "parameter_value requires parameter_name.",
+                        "Provide both parameter_name and parameter_value, or omit both."));
+                if (matchMode == "empty" && hasParameterValue)
+                    return Task.FromResult(CommandResult.Fail(
+                        "parameter_value cannot be combined with match_mode='empty'.",
+                        "Omit parameter_value when using match_mode='empty'."));
+                if (hasGroupByParameter && (!summaryOnly || idsOnly))
+                    return Task.FromResult(CommandResult.Fail(
+                        "group_by_parameter is available only when summary_only=true and ids_only=false.",
+                        "Use summary_only=true and ids_only=false, or omit group_by_parameter."));
+
+                var isSummaryMode = summaryOnly && !idsOnly;
+                if (isSummaryMode && (hasLimit || hasCursor))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        "limit and cursor are not available in summary mode.",
+                        "Omit limit/cursor for summary_only=true, or set summary_only=false (or ids_only=true) to paginate results."));
+                }
 
                 // ids_only implies the caller wants the element list, not the summary.
                 if (idsOnly)
                     summaryOnly = false;
 
-                // Clamp limit. ids_only responses are tiny (one integer per element),
-                // so they get a much larger default page and cap.
-                if (idsOnly)
-                    limit = limit <= 0 ? 5000 : Math.Max(1, Math.Min(limit, 10000));
-                else
-                    limit = limit <= 0 ? 50 : Math.Max(1, Math.Min(limit, 200));
+                // An omitted limit receives the mode default. Supplied values
+                // (including null) fail closed rather than being silently clamped.
+                var maxLimit = idsOnly ? 10000 : 200;
+                if (hasLimit && (limit < 1 || limit > maxLimit))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        $"limit must be between 1 and {maxLimit} in {(idsOnly ? "ids_only" : "detail")} mode.",
+                        $"Use an integer from 1 to {maxLimit}, or omit limit to use the default."));
+                }
+                if (!hasLimit)
+                    limit = idsOnly ? 5000 : 50;
 
                 // Resolve BuiltInCategory
                 if (!TryResolveCategory(categoryName, out BuiltInCategory builtInCat))
@@ -83,53 +163,54 @@ namespace RevitMCP.CommandSet.Commands.Query
                         $"Unknown category: '{categoryName}'",
                         "Use revit_get_all_categories to see valid category names."));
 
-                // Collect elements
-                var collector = new FilteredElementCollector(doc)
+                // Single-pass filtering avoids materializing and repeatedly
+                // scanning very large category collections.
+                var elements = new List<Element>();
+                foreach (var element in new FilteredElementCollector(doc)
                     .OfCategory(builtInCat)
-                    .WhereElementIsNotElementType();
-
-                var elements = collector.ToList();
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // Apply filters
-                if (!string.IsNullOrEmpty(levelFilter))
+                    .WhereElementIsNotElementType())
                 {
-                    elements = elements.Where(e =>
-                    {
-                        var levelId = e.LevelId;
-                        if (levelId == null || levelId == ElementId.InvalidElementId) return false;
-                        var level = doc.GetElement(levelId) as Level;
-                        return level != null && level.Name.Equals(levelFilter, StringComparison.OrdinalIgnoreCase);
-                    }).ToList();
-                }
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                if (!string.IsNullOrEmpty(typeFilter))
-                {
-                    elements = elements.Where(e =>
+                    if (!string.IsNullOrEmpty(levelFilter))
                     {
-                        var typeId = e.GetTypeId();
-                        if (typeId == null || typeId == ElementId.InvalidElementId) return false;
-                        var type = doc.GetElement(typeId);
-                        return type != null && type.Name.IndexOf(typeFilter, StringComparison.OrdinalIgnoreCase) >= 0;
-                    }).ToList();
-                }
+                        var levelId = element.LevelId;
+                        var level = levelId != null && levelId != ElementId.InvalidElementId
+                            ? doc.GetElement(levelId) as Level
+                            : null;
+                        if (level == null
+                            || !level.Name.Equals(levelFilter, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
 
-                if (!string.IsNullOrEmpty(parameterName))
-                {
-                    elements = elements.Where(e =>
+                    if (!string.IsNullOrEmpty(typeFilter))
                     {
-                        var param = e.LookupParameter(parameterName);
-                        if (param == null) return false;
+                        var typeId = element.GetTypeId();
+                        var type = typeId != null && typeId != ElementId.InvalidElementId
+                            ? doc.GetElement(typeId)
+                            : null;
+                        if (type == null
+                            || type.Name.IndexOf(typeFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                            continue;
+                    }
 
+                    if (!string.IsNullOrEmpty(parameterName))
+                    {
+                        var param = element.LookupParameter(parameterName);
+                        if (param == null) continue;
                         if (matchMode == "empty")
-                            return IsValueEmpty(param);
+                        {
+                            if (!IsValueEmpty(param)) continue;
+                        }
+                        else if (!string.IsNullOrEmpty(parameterValue)
+                            && !MatchesValue(param, parameterValue, matchMode))
+                        {
+                            continue;
+                        }
+                    }
 
-                        if (string.IsNullOrEmpty(parameterValue)) return true;
-                        return MatchesValue(param, parameterValue, matchMode);
-                    }).ToList();
+                    elements.Add(element);
                 }
-
-                cancellationToken.ThrowIfCancellationRequested();
 
                 // Tier 1: Summary mode
                 if (summaryOnly)
@@ -142,6 +223,7 @@ namespace RevitMCP.CommandSet.Commands.Query
 
                     foreach (var elem in elements)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         // Group by type
                         var typeId = elem.GetTypeId();
                         var typeName = (typeId != null && typeId != ElementId.InvalidElementId)
@@ -197,6 +279,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                 }
 
                 // Tier 2: Paginated detail (or lightweight ID list)
+                elements = elements.OrderBy(e => e.Id.GetValue()).ToList();
                 var offset = ParseCursor(cursor);
                 var paged = elements.Skip(offset).Take(limit).ToList();
 
@@ -215,7 +298,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                 };
 
                 if (idsOnly)
-                    result["ids"] = paged.Select(e => e.Id.IntegerValue).ToList();
+                    result["ids"] = paged.Select(e => e.Id.GetValue()).ToList();
                 else
                     result["items"] = paged.Select(e => SerializeElement(doc, e)).ToList();
 
@@ -226,6 +309,12 @@ namespace RevitMCP.CommandSet.Commands.Query
                 return Task.FromResult(CommandResult.Fail(
                     "Query was cancelled due to timeout.",
                     "Try a more specific filter or use summary_only mode for large categories."));
+            }
+            catch (ArgumentException ex)
+            {
+                return Task.FromResult(CommandResult.Fail(
+                    $"Invalid query input: {ex.Message}",
+                    "Use the exact next_cursor returned by the previous page, or omit cursor to start from the first page."));
             }
             catch (Exception ex)
             {
@@ -242,7 +331,7 @@ namespace RevitMCP.CommandSet.Commands.Query
         {
             var result = new Dictionary<string, object>
             {
-                ["id"] = elem.Id.IntegerValue,
+                ["id"] = elem.Id.GetValue(),
                 ["name"] = elem.Name ?? "",
                 ["category"] = elem.Category?.Name ?? "Unknown"
             };
@@ -301,20 +390,34 @@ namespace RevitMCP.CommandSet.Commands.Query
         /// </summary>
         private int ParseCursor(string cursor)
         {
-            if (string.IsNullOrEmpty(cursor)) return 0;
+            if (cursor == null) return 0;
+            if (string.IsNullOrWhiteSpace(cursor))
+                throw new ArgumentException("cursor cannot be empty or whitespace.");
 
             // Plain integer cursor — accepted as a direct offset.
             if (int.TryParse(cursor, out var plainOffset))
-                return Math.Max(0, plainOffset);
+            {
+                if (plainOffset < 0)
+                    throw new ArgumentException("cursor offset cannot be negative.");
+                return plainOffset;
+            }
 
             try
             {
                 var decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
                 if (decoded.StartsWith("offset:") && int.TryParse(decoded.Substring(7), out var offset))
-                    return Math.Max(0, offset);
+                {
+                    if (offset < 0)
+                        throw new ArgumentException("cursor offset cannot be negative.");
+                    return offset;
+                }
             }
-            catch { }
-            return 0;
+            catch (ArgumentException) { throw; }
+            catch (Exception ex)
+            {
+                throw new ArgumentException("cursor is not a valid plain offset or issued base64 cursor.", ex);
+            }
+            throw new ArgumentException("cursor is not a valid offset cursor.");
         }
 
         /// <summary>
@@ -424,6 +527,129 @@ namespace RevitMCP.CommandSet.Commands.Query
             {
                 return defaultValue;
             }
+        }
+
+        /// <summary>
+        /// True when a raw WebSocket caller supplied a non-null value for a key.
+        /// Some legacy optional string fields are forwarded as null by the MCP
+        /// server, so null does not count as explicitly setting those options.
+        /// </summary>
+        private static bool HasNonNullParameter(
+            Dictionary<string, object> parameters,
+            string key)
+        {
+            return parameters != null
+                && parameters.TryGetValue(key, out var value)
+                && value != null;
+        }
+
+        private static bool TryGetOptionalInteger(
+            Dictionary<string, object> parameters,
+            string key,
+            out bool supplied,
+            out int value,
+            out string error)
+        {
+            supplied = false;
+            value = 0;
+            error = null;
+            if (parameters == null ||
+                !parameters.TryGetValue(key, out var raw))
+            {
+                return true;
+            }
+
+            supplied = true;
+            if (raw == null)
+            {
+                error = $"{key} must be a 32-bit integer when supplied.";
+                return false;
+            }
+            switch (raw)
+            {
+                case int intValue:
+                    value = intValue;
+                    return true;
+                case long longValue
+                    when longValue >= int.MinValue &&
+                         longValue <= int.MaxValue:
+                    value = (int)longValue;
+                    return true;
+                case double doubleValue
+                    when !double.IsNaN(doubleValue) &&
+                         !double.IsInfinity(doubleValue) &&
+                         doubleValue == Math.Truncate(doubleValue) &&
+                         doubleValue >= int.MinValue &&
+                         doubleValue <= int.MaxValue:
+                    value = (int)doubleValue;
+                    return true;
+                default:
+                    error = $"{key} must be a 32-bit integer when supplied.";
+                    return false;
+            }
+        }
+
+        private static bool TryGetOptionalTrimmedString(
+            Dictionary<string, object> parameters,
+            string key,
+            out bool supplied,
+            out string value,
+            out string error)
+        {
+            supplied = false;
+            value = null;
+            error = null;
+            if (parameters == null ||
+                !parameters.TryGetValue(key, out var raw))
+            {
+                return true;
+            }
+
+            supplied = true;
+            if (raw == null)
+            {
+                error = $"{key} must be a string when supplied.";
+                return false;
+            }
+            if (!(raw is string text))
+            {
+                error = $"{key} must be a string when supplied.";
+                return false;
+            }
+
+            value = text.Trim();
+            if (value.Length == 0)
+            {
+                error = $"{key} cannot be empty or whitespace.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TryGetOptionalNonBlankString(
+            Dictionary<string, object> parameters,
+            string key,
+            out string value,
+            out string error)
+        {
+            value = null;
+            error = null;
+            if (parameters == null ||
+                !parameters.TryGetValue(key, out var raw) ||
+                raw == null)
+            {
+                return true;
+            }
+
+            if (!(raw is string text) || string.IsNullOrWhiteSpace(text))
+            {
+                error = $"{key} must be a non-empty string when supplied.";
+                return false;
+            }
+
+            value = text.Trim();
+            return true;
         }
     }
 }

@@ -5,14 +5,14 @@ End-to-end checklist for adding a tool that goes from `Claude → MCP server
 
 > See [`WIRE_PROTOCOL.md`](./WIRE_PROTOCOL.md) for the message format.
 
-## Three files, no glue code
+## Two implementation files plus tests
 
 The plugin uses reflection to auto-discover commands. Adding a new tool
-means writing exactly three things:
+means writing two required pieces and a regression test:
 
 1. A C# class implementing `IRevitCommand` / `ICadCommand`
 2. A TypeScript tool registration in `server/src/tools/<category>.ts`
-3. (Optional) A test case appended to `scripts/verify-server-shim.mjs`
+3. A focused contract/unit test under the relevant `src/**/__tests__/`
 
 ## 1. C# command class
 
@@ -49,12 +49,19 @@ namespace RevitMCP.CommandSet.Commands.<Category>
                 {
                     tx.Start();
                     // … Revit API calls …
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
                 }
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
                     ["result"] = "value",
+                    ["mutation_committed"] = true,
+                    ["verification"] = new Dictionary<string, object>
+                    {
+                        ["performed"] = true,
+                        ["match"] = true,
+                    },
                 }));
             }
             catch (Exception ex)
@@ -70,9 +77,11 @@ namespace RevitMCP.CommandSet.Commands.<Category>
 
 ### Rules
 
-- **Transactions**: every API call that mutates the document MUST be wrapped
-  in `Transaction`. Read-only queries do not need one (Revit) — note that
-  AutoCAD requires read transactions too (`StartTransaction()` + `GetObject(... ForRead)`).
+- **Transactions**: every Revit API call that mutates the document MUST be
+  wrapped in `Transaction`; use `CommitOrThrow()` and check cancellation
+  before commit. Revit queries do not need one. AutoCAD commands must use
+  the transaction supplied by the plugin and must not commit, abort, or
+  start a nested transaction themselves.
 - **No threading tricks**: the dispatcher already marshalled you onto the
   main thread. Just write straight-line code.
 - **Cancellation**: in any loop > 100 iterations, call
@@ -80,9 +89,13 @@ namespace RevitMCP.CommandSet.Commands.<Category>
 - **Errors**: prefer `CommandResult.Fail(message, suggestion)` over throwing.
   Throwing is fine for unexpected bugs — the dispatcher will catch and
   attach a generic suggestion.
-- **Verification (Tier 1)**: for CREATE/MODIFY commands, after `tx.Commit()`,
-  re-query the element and compare against the request. Add a `verification`
-  block to the success payload. See `CreateWallCommand.cs` for the pattern.
+- **Verification (Tier 1)**: for Revit CREATE/MODIFY commands, after commit,
+  re-query the element and compare against the request. AutoCAD commands do
+  not own their transaction: they may return only a clearly marked
+  `phase: "pre_commit"` provisional check. The AutoCAD plugin dispatcher must
+  replace it after commit by reopening the `ObjectId` in a new read
+  transaction and setting `commit_verified`. Never label an in-transaction
+  managed-object check as post-commit verification.
 
 ## 2. TypeScript tool registration
 
@@ -147,26 +160,19 @@ node scripts/test-ws.js <wire_name> '{"param":"value"}'
 This bypasses the MCP server entirely — useful for iterating on the C#
 side without restarting Claude Desktop.
 
-### Regression test:
+### Regression tests:
 
-After the command is stable, append a case to
-`scripts/verify-server-shim.mjs` so future refactors don't break it:
-
-```javascript
-const CASES = [
-  // …existing…
-  ["NN_<name>", "<wire_name>", { param: "value" }],
-];
-```
-
-Then capture a baseline:
+Add a contract test beside the TypeScript tools and, when practical, a
+host-independent unit test for validation and serialization. Run:
 
 ```bash
-node scripts/test-ws.js <wire_name> '{"param":"value"}' \
-  > "작업자료/$(date +%Y-%m-%d)/snapshots/baseline-pre-refactor/NN_<name>.json"
+npm test
+dotnet build RevitMCP.sln -c Release
+dotnet build autocad/AutoCADMCP.sln -c Release
 ```
 
-Subsequent runs of `verify-server-shim.mjs` will diff against this.
+Live model or drawing baselines may contain customer data. Store them under
+the ignored `.local/` directory, never in a public commit.
 
 ## Common pitfalls
 
@@ -174,7 +180,8 @@ See [`CLAUDE.md`](../CLAUDE.md) "Known Pitfalls" section. Highlights:
 
 - The `Commands.View` namespace shadows `Autodesk.Revit.DB.View` — use
   `global::Autodesk.Revit.DB.View` inside `Commands/View/`.
-- Structural framing has `LevelId == InvalidElementId` — filter by the
-  "참조 레벨" parameter, not by `level_filter`.
+- Structural framing can have `LevelId == InvalidElementId`; use the
+  appropriate reference-level or project-specific parameter instead of
+  assuming `level_filter` will work.
 - AutoCAD requires read transactions even for queries — Revit does not.
 - `IsolateElementsTemporary()` is Revit 2024+ only.

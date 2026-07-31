@@ -1,9 +1,10 @@
 {
   "name": "@kimminsub/revit-mcp",
   "version": "0.1.0",
-  "description": "Model Context Protocol server for Autodesk Revit — 20 tools for read / query / create / modify / view operations, driven by Claude and other MCP clients.",
+  "description": "Model Context Protocol server for Autodesk Revit — 32 tools for query, create, modify, view, export, visualization, and scripted operations.",
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "revit-mcp": "dist/index.js"
   },
@@ -42,20 +43,17 @@
     "url": "https://github.com/mskim274/revit-mcp-v2/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "dependencies": {
-    "@kimminsub/mcp-cad-core": "*",
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "ws": "^8.18.0",
-    "zod": "^3.24.0",
-    "uuid": "^11.1.0"
+    "@kimminsub/mcp-cad-core": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.0",
-    "@types/uuid": "^10.0.0",
-    "typescript": "^5.7.0"
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=20.0.0"

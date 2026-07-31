@@ -4,7 +4,7 @@
 # touching the user's real Autodesk Addins folder.
 #
 # Usage: bash scripts/test-updater.sh
-set -uo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
 UPDATER="updater/bin/Release/net8.0-windows/RevitMCPUpdater.exe"
@@ -68,6 +68,17 @@ assert_file_contains() {
   fi
 }
 
+assert_file_absent() {
+  local path="$1"
+  if [ ! -e "$path" ]; then
+    echo "[ OK ]   path was not created: $path"
+    pass=$((pass+1))
+  else
+    echo "[FAIL]   unexpected path exists: $path"
+    fail=$((fail+1))
+  fi
+}
+
 echo "── T1: happy-path extract via --addins-dir override ──"
 check "extract" 0 "$UPDATER" --zip "$TEST_ZIP" --no-wait --addins-dir "$TARGET_DIR"
 assert_file_contains "$TARGET_DIR/marker.txt" "hello-from-test"
@@ -93,6 +104,44 @@ assert_log_contains "AutoCADMCP.bundle"
 
 echo "── T6: unknown product surfaces exit code 2 ──"
 check "unknown-product" 2 "$UPDATER" --zip "$MISSING_ZIP" --no-wait --product solidworks
+
+echo "── T7: Zip Slip entry is rejected before touching the target ──"
+TRAVERSAL_ZIP="$ROOT_TMP/traversal.zip"
+TRAVERSAL_ZIP_WIN=$(cygpath -w "$TRAVERSAL_ZIP")
+export TRAVERSAL_ZIP_WIN
+powershell -NoProfile -Command '
+  Add-Type -AssemblyName System.IO.Compression
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive = [IO.Compression.ZipFile]::Open(
+    $env:TRAVERSAL_ZIP_WIN,
+    [IO.Compression.ZipArchiveMode]::Create)
+  try {
+    $entry = $archive.CreateEntry("../escaped.txt")
+    $writer = [IO.StreamWriter]::new($entry.Open())
+    try { $writer.Write("must-not-escape") } finally { $writer.Dispose() }
+  }
+  finally {
+    $archive.Dispose()
+  }
+' >/dev/null
+echo "preserve-before-rejected-update" > "$TARGET_DIR/preserved.txt"
+check "zip-slip" 1 "$UPDATER" --zip "$TRAVERSAL_ZIP" --no-wait --addins-dir "$TARGET_DIR"
+assert_log_contains "unsafe path segment"
+assert_file_absent "$ROOT_TMP/escaped.txt"
+assert_file_contains "$TARGET_DIR/preserved.txt" "preserve-before-rejected-update"
+
+echo "── T8: normal replacement keeps a .bak copy of the previous file ──"
+REPLACE_ZIP="$ROOT_TMP/replacement.zip"
+mkdir -p "$ROOT_TMP/replacement-src"
+echo "hello-after-replacement" > "$ROOT_TMP/replacement-src/marker.txt"
+REPLACE_SRC_WIN=$(cygpath -w "$ROOT_TMP/replacement-src/marker.txt")
+REPLACE_ZIP_WIN=$(cygpath -w "$REPLACE_ZIP")
+powershell -NoProfile -Command \
+  "Compress-Archive -Path '$REPLACE_SRC_WIN' -DestinationPath '$REPLACE_ZIP_WIN'" \
+  >/dev/null
+check "replace-existing" 0 "$UPDATER" --zip "$REPLACE_ZIP" --no-wait --addins-dir "$TARGET_DIR"
+assert_file_contains "$TARGET_DIR/marker.txt" "hello-after-replacement"
+assert_file_contains "$TARGET_DIR/marker.txt.bak" "hello-from-test"
 
 echo
 echo "passed: $pass  failed: $fail"
