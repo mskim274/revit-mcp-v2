@@ -16,7 +16,7 @@
        (e.g., v0.2.0 → 0.2.0.0). Required for the auto-update check to
        compare the running plugin against GitHub Releases. -->
   <ItemGroup>
-    <PackageReference Include="MinVer" Version="5.0.0">
+    <PackageReference Include="MinVer" Version="7.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
