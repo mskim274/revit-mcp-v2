@@ -32,7 +32,7 @@
   </ItemGroup>
 
   <ItemGroup Condition="!Exists('$(AutoCAD2025Path)\accoremgd.dll')">
-    <PackageReference Include="AutoCAD.NET" Version="25.0.1">
+    <PackageReference Include="AutoCAD.NET" Version="25.1.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>compile; build; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
