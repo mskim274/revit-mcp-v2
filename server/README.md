@@ -3,43 +3,23 @@
 [![npm version](https://img.shields.io/npm/v/@kimminsub/revit-mcp.svg)](https://www.npmjs.com/package/@kimminsub/revit-mcp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mskim274/revit-mcp-v2/blob/main/LICENSE)
 
-Model Context Protocol server for Autodesk Revit. Lets Claude (and other
-MCP clients) read, query, create, and modify elements in a running Revit
-session through natural language. 20 tools across Utility / Query /
-Create / Modify / View.
+The TypeScript MCP server for Autodesk Revit. It exposes 32 tools for query,
+creation, modification, view control, export, visualization, and controlled
+C# scripting.
 
-> **This is the TypeScript MCP server half.** The C# Revit plugin that
-> it talks to lives in the same repo and is installed separately inside
-> Revit itself. See the full repo for the plugin install instructions.
+This package is one half of the system. The companion C# add-in must be
+installed inside Revit before the MCP server can connect.
 
----
+## Install for an MCP client
 
-## Install for Claude Desktop
-
-Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+Add this entry to the client's MCP configuration:
 
 ```json
 {
   "mcpServers": {
     "revit": {
       "command": "npx",
-      "args": ["-y", "@kimminsub/revit-mcp"]
-    }
-  }
-}
-```
-
-Restart Claude Desktop. `npx` will download and run the server the first
-time — no manual clone, install, or build needed for this half.
-
-### Optional environment variables
-
-```json
-{
-  "mcpServers": {
-    "revit": {
-      "command": "npx",
-      "args": ["-y", "@kimminsub/revit-mcp"],
+      "args": ["-y", "@kimminsub/revit-mcp@latest"],
       "env": {
         "REVIT_MCP_HOST": "127.0.0.1",
         "REVIT_MCP_PORT": "8181"
@@ -49,54 +29,61 @@ time — no manual clone, install, or build needed for this half.
 }
 ```
 
----
+Restart the client after updating its configuration.
 
-## Prerequisites: Revit plugin
+## Install the Revit add-in
 
-This server talks to a companion C# add-in that runs *inside* Revit.
-Install it once per machine:
-
-1. Download the latest `RevitMCPPlugin-<version>-Revit2025.zip` from
+1. Download `RevitMCPPlugin-<version>-Revit2025.zip` and
+   `SHA256SUMS.txt` from
    [GitHub Releases](https://github.com/mskim274/revit-mcp-v2/releases/latest).
-2. Close Revit.
-3. Extract the four files to `%APPDATA%\Autodesk\Revit\Addins\2025\`.
-4. Start Revit and open a project. The plugin starts a WebSocket server
-   on port 8181; the MCP server connects to it automatically.
+2. Verify the archive hash and close Revit.
+3. Extract **all files** into
+   `%APPDATA%\Autodesk\Revit\Addins\2025\`.
+4. Start Revit and open or create a project.
 
-After the first install, future plugin updates arrive via a one-click
-dialog inside Revit. No manual re-downloading.
+The plugin listens on `127.0.0.1:8181` and the MCP server reconnects
+automatically.
 
----
+The published add-in supports Revit 2025 exactly. Revit 2026 and later require
+a year-specific API build, release asset, and validation and are not currently
+supported.
 
 ## Verify
 
-Ask Claude: *"Call revit_ping."* You should see the Revit version,
-document name, and element count come back.
+Call `revit_ping`. A successful response includes the Revit build and current
+document information.
 
----
+## Tool inventory
 
-## Tool inventory (v0.1)
+| Category | Count |
+|---|---:|
+| Utility | 2 |
+| Query | 10 |
+| Create | 3 |
+| Modify | 8 |
+| View | 5 |
+| Export | 1 |
+| Visualize / Review | 2 |
+| Script | 1 |
+| **Total** | **32** |
 
-| Category | Tools |
-|---|---|
-| Utility | `revit_ping`, `revit_get_project_info` |
-| Query | `revit_get_levels`, `revit_get_views`, `revit_get_grids`, `revit_query_elements`, `revit_get_element_info`, `revit_get_types_by_category`, `revit_get_family_types`, `revit_get_all_categories` |
-| Create | `revit_create_wall`, `revit_create_floor` |
-| Modify | `revit_modify_element_parameter`, `revit_delete_elements`, `revit_move_elements`, `revit_copy_elements` |
-| View | `revit_set_active_view`, `revit_isolate_elements`, `revit_reset_view_isolation`, `revit_select_elements` |
+Full tool and safety documentation is maintained in the
+[repository README](https://github.com/mskim274/revit-mcp-v2#readme) and
+[CLAUDE.md](https://github.com/mskim274/revit-mcp-v2/blob/main/CLAUDE.md).
 
-Full tool docs: [CLAUDE.md](https://github.com/mskim274/revit-mcp-v2/blob/main/CLAUDE.md)
+## Security
 
----
+Keep `REVIT_MCP_HOST` on loopback. The server can invoke model mutations, and
+`revit_execute_script` is not a security sandbox. Review the
+[security policy](https://github.com/mskim274/revit-mcp-v2/blob/main/SECURITY.md)
+before use and never attach confidential model output to a public issue.
 
 ## Links
 
-- **Main repo**: https://github.com/mskim274/revit-mcp-v2
-- **Changelog**: https://github.com/mskim274/revit-mcp-v2/blob/main/CHANGELOG.md
-- **Issues**: https://github.com/mskim274/revit-mcp-v2/issues
-
----
+- [Source and plugin releases](https://github.com/mskim274/revit-mcp-v2)
+- [Changelog](https://github.com/mskim274/revit-mcp-v2/blob/main/CHANGELOG.md)
+- [Issue tracker](https://github.com/mskim274/revit-mcp-v2/issues)
 
 ## License
 
-MIT
+[MIT](LICENSE)

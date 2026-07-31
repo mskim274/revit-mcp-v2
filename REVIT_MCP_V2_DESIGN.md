@@ -1,9 +1,15 @@
 # Revit MCP V2 — Architecture Design Document
 
-**Author:** kimminsub (and.ms.kim@gmail.com)
+**Author:** Revit MCP contributors
 **Date:** 2026-03-29
 **Status:** Draft — Review Required
 **Version:** 0.1.0
+
+> Historical design record. It does not define the current public support
+> contract. Use `README.md`, `CLAUDE.md`, and the checked-in workflows as the
+> implementation source of truth. Current public binaries target Revit 2025
+> exactly, and every public command requires both a C# implementation and a
+> TypeScript MCP tool contract.
 
 ---
 
@@ -490,7 +496,7 @@ public class CommandDispatcher
 #if NET48
     // Revit 2023/2024 specific code
 #else
-    // Revit 2025+ specific code
+    // Revit 2025-specific code
 #endif
 ```
 

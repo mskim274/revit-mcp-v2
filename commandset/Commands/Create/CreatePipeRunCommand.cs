@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Plumbing;
+using RevitMCP.CommandSet.Helpers;
 using RevitMCP.CommandSet.Interfaces;
 
 namespace RevitMCP.CommandSet.Commands.Create
@@ -28,7 +29,8 @@ namespace RevitMCP.CommandSet.Commands.Create
     ///   points          (array, required) — [{e,n,z}] survey or [{x,y,z}] internal. Min 2.
     ///   coordinate_mode (string)          — "survey" (default) | "internal"
     ///   input_unit      (string)          — survey/elevation unit: "m" (default) | "mm"
-    ///   pipe_type       (string|int)      — PipeType name (contains) or ElementId
+    ///   pipe_type       (string|int)      — PipeType ElementId or name (exact first,
+    ///                                       then an unambiguous contains match)
     ///   system_type_id  (int, optional)   — PipingSystemType id (default: first found)
     ///   diameter_mm     (number, optional)— pipe diameter in mm (default: type default)
     ///   level_name      (string, optional)— reference level (default: nearest by elevation)
@@ -54,7 +56,7 @@ namespace RevitMCP.CommandSet.Commands.Create
                     || !(ptsObj is List<object> rawPts) || rawPts.Count < 2)
                     return Task.FromResult(CommandResult.Fail(
                         "Missing or invalid 'points' (need at least 2).",
-                        "Provide points as [{\"e\":228231.2,\"n\":506653.9,\"z\":130.29}, ...] (survey) " +
+                        "Provide points as [{\"e\":500000,\"n\":200000,\"z\":100}, ...] (survey) " +
                         "or [{\"x\":..,\"y\":..,\"z\":..}, ...] (internal)."));
 
                 if (rawPts.Count > MaxPoints)
@@ -63,12 +65,53 @@ namespace RevitMCP.CommandSet.Commands.Create
                         "Split into multiple runs."));
 
                 var mode = (GetStr(parameters, "coordinate_mode", "survey") ?? "survey").ToLowerInvariant();
-                var unit = (GetStr(parameters, "input_unit", "m") ?? "m").ToLowerInvariant();
-                double unitToFt = unit == "mm" ? 1.0 / 304.8 : 1.0 / 0.3048;  // m default
+                if (mode != "survey" && mode != "internal")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Invalid coordinate_mode '{mode}'.",
+                        "Use coordinate_mode=\"survey\" or coordinate_mode=\"internal\"."));
+
+                var unit = (GetStr(parameters, "input_unit", mode == "internal" ? "ft" : "m")
+                    ?? (mode == "internal" ? "ft" : "m")).ToLowerInvariant();
+                if (mode == "internal" && unit != "ft")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Internal coordinates use raw Revit feet; input_unit '{unit}' is not valid.",
+                        "Set input_unit=\"ft\" or omit input_unit when coordinate_mode=\"internal\"."));
+                if (mode == "survey" && unit != "m" && unit != "mm")
+                    return Task.FromResult(CommandResult.Fail(
+                        $"Survey coordinates support input_unit \"m\" or \"mm\", not '{unit}'.",
+                        "Use input_unit=\"m\" or input_unit=\"mm\"."));
+
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "connect_elbows",
+                        defaultValue: true,
+                        out var connectElbows,
+                        out var connectElbowsError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        connectElbowsError,
+                        "Pass connect_elbows as true or false, or omit it to use true."));
+                }
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "allow_identity_transform",
+                        defaultValue: false,
+                        out var allowIdentityTransform,
+                        out var allowIdentityError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        allowIdentityError,
+                        "Pass allow_identity_transform as true or false, or omit it to use false."));
+                }
+
+                double unitToFt = unit == "mm" ? 1.0 / 304.8 : 1.0 / 0.3048;
 
                 // ─── resolve pipe type ───
                 var pipeTypes = new FilteredElementCollector(doc).OfClass(typeof(PipeType))
-                    .Cast<PipeType>().ToList();
+                    .Cast<PipeType>()
+                    .OrderBy(type => type.Name, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(type => type.Id.GetValue())
+                    .ToList();
                 if (pipeTypes.Count == 0)
                     return Task.FromResult(CommandResult.Fail(
                         "No PipeType found in this project.",
@@ -77,26 +120,103 @@ namespace RevitMCP.CommandSet.Commands.Create
                 PipeType pipeType = null;
                 if (parameters.TryGetValue("pipe_type", out var ptRaw) && ptRaw != null)
                 {
-                    if (int.TryParse(ptRaw.ToString(), out var ptId))
-                        pipeType = pipeTypes.FirstOrDefault(t => t.Id.IntegerValue == ptId);
+                    var requestedType = ptRaw.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(requestedType))
+                        return Task.FromResult(CommandResult.Fail(
+                            "pipe_type must not be empty.",
+                            "Pass an exact PipeType name, an unambiguous name fragment, or an ElementId."));
+
+                    // A string can legitimately be a numeric-looking type
+                    // name, so exact name matching must precede ID parsing.
+                    var exactMatches = pipeTypes.Where(t =>
+                        t.Name.Equals(
+                            requestedType,
+                            StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                    if (exactMatches.Count == 1)
+                    {
+                        pipeType = exactMatches[0];
+                    }
+                    else if (exactMatches.Count > 1)
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            $"PipeType name '{requestedType}' is ambiguous ({exactMatches.Count} exact matches).",
+                            "Use the ElementId of the intended type. Matches: " +
+                            string.Join(", ", exactMatches.Take(20).Select(t =>
+                                $"{t.Name} (id {t.Id.GetValue()})"))));
+                    }
+
+                    var parsedElementId = long.TryParse(
+                        requestedType,
+                        out var ptId);
+                    if (pipeType == null && parsedElementId)
+                    {
+                        pipeType = pipeTypes.FirstOrDefault(
+                            t => t.Id.GetValue() == ptId);
+                        if (pipeType == null && !(ptRaw is string))
+                            return Task.FromResult(CommandResult.Fail(
+                                $"PipeType id '{ptId}' not found.",
+                                "Query the available pipe types and retry with a valid ElementId."));
+                    }
+
                     if (pipeType == null)
-                        pipeType = pipeTypes.FirstOrDefault(t =>
-                            t.Name.IndexOf(ptRaw.ToString(), StringComparison.OrdinalIgnoreCase) >= 0);
+                    {
+                        var containsMatches = pipeTypes.Where(t =>
+                            t.Name.IndexOf(
+                                requestedType,
+                                StringComparison.OrdinalIgnoreCase) >= 0)
+                            .ToList();
+                        if (containsMatches.Count == 1)
+                        {
+                            pipeType = containsMatches[0];
+                        }
+                        else if (containsMatches.Count > 1)
+                        {
+                            return Task.FromResult(CommandResult.Fail(
+                                $"PipeType name '{requestedType}' is ambiguous ({containsMatches.Count} matches).",
+                                "Use the exact name or ElementId. Matches: " +
+                                string.Join(", ", containsMatches.Take(20).Select(t =>
+                                    $"{t.Name} (id {t.Id.GetValue()})"))));
+                        }
+                    }
+
                     if (pipeType == null)
                         return Task.FromResult(CommandResult.Fail(
-                            $"PipeType '{ptRaw}' not found.",
-                            "Available: " + string.Join(", ", pipeTypes.Select(t => t.Name))));
+                            parsedElementId
+                                ? $"No PipeType name or id matched '{requestedType}'."
+                                : $"PipeType '{requestedType}' not found.",
+                            "Available: " + string.Join(", ", pipeTypes.Take(20).Select(t =>
+                                $"{t.Name} (id {t.Id.GetValue()})"))));
                 }
                 else pipeType = pipeTypes.First();
 
                 // ─── resolve system type ───
                 ElementId sysTypeId;
-                if (parameters.TryGetValue("system_type_id", out var stRaw) && stRaw != null
-                    && int.TryParse(stRaw.ToString(), out var stId))
-                    sysTypeId = new ElementId(stId);
+                if (parameters.TryGetValue("system_type_id", out var stRaw) &&
+                    stRaw != null)
+                {
+                    if (!long.TryParse(stRaw.ToString(), out var stId))
+                        return Task.FromResult(CommandResult.Fail(
+                            $"Invalid system_type_id '{stRaw}'.",
+                            "Pass the ElementId of a PipingSystemType, or omit it to use the first available type."));
+
+                    var requestedSystemType =
+                        doc.GetElement(ElementIdCompatibility.Create(stId))
+                        as PipingSystemType;
+                    if (requestedSystemType == null)
+                        return Task.FromResult(CommandResult.Fail(
+                            $"PipingSystemType id '{stId}' was not found.",
+                            "Query the available piping system types and retry with a valid ElementId."));
+                    sysTypeId = requestedSystemType.Id;
+                }
                 else
                 {
-                    var st = new FilteredElementCollector(doc).OfClass(typeof(PipingSystemType)).FirstElement();
+                    var st = new FilteredElementCollector(doc)
+                        .OfClass(typeof(PipingSystemType))
+                        .Cast<PipingSystemType>()
+                        .OrderBy(type => type.Name, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(type => type.Id.GetValue())
+                        .FirstOrDefault();
                     if (st == null)
                         return Task.FromResult(CommandResult.Fail(
                             "No PipingSystemType found.",
@@ -110,8 +230,8 @@ namespace RevitMCP.CommandSet.Commands.Create
 
                 if (mode == "internal")
                 {
-                    toInternal = (x, y, z) => new XYZ(x * unitToFt, y * unitToFt, z * unitToFt);
-                    coordNote = "internal coordinates (unit-scaled only)";
+                    toInternal = (x, y, z) => new XYZ(x, y, z);
+                    coordNote = "raw Revit internal coordinates (feet)";
                 }
                 else // survey
                 {
@@ -119,11 +239,17 @@ namespace RevitMCP.CommandSet.Commands.Create
                     var pp = pl.GetProjectPosition(XYZ.Zero);
                     double EW0 = pp.EastWest, NS0 = pp.NorthSouth, ang = pp.Angle, EL0 = pp.Elevation;
 
-                    // Guard: shared coordinates not configured → conversion is meaningless.
-                    if (Math.Abs(EW0) < 1e-6 && Math.Abs(NS0) < 1e-6 && Math.Abs(ang) < 1e-9)
+                    // An all-zero project transform is indistinguishable from an
+                    // intentionally configured identity transform. Fail closed by
+                    // default and allow only an explicit, informed override.
+                    if (!allowIdentityTransform &&
+                        Math.Abs(EW0) < 1e-6 &&
+                        Math.Abs(NS0) < 1e-6 &&
+                        Math.Abs(EL0) < 1e-6 &&
+                        Math.Abs(ang) < 1e-9)
                         return Task.FromResult(CommandResult.Fail(
-                            "This project has no Shared Coordinates configured (survey origin is 0,0,0).",
-                            "Set up Shared Coordinates in Revit, or call again with coordinate_mode=\"internal\"."));
+                            "The project location uses an identity survey transform (east/west, north/south, elevation, and angle are all zero).",
+                            "Verify Shared Coordinates, use coordinate_mode=\"internal\", or set allow_identity_transform=true only when survey and internal coordinates intentionally match."));
 
                     double c = Math.Cos(ang), s = Math.Sin(ang);
 
@@ -149,25 +275,58 @@ namespace RevitMCP.CommandSet.Commands.Create
                 // ─── build internal points ───
                 var pts = new List<XYZ>();
                 var surveyForVerify = new List<double[]>();
-                foreach (var o in rawPts)
+                for (int pointIndex = 0; pointIndex < rawPts.Count; pointIndex++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var o = rawPts[pointIndex];
                     if (!(o is Dictionary<string, object> d))
                         return Task.FromResult(CommandResult.Fail(
-                            "Each point must be an object.",
+                            $"Point at index {pointIndex} must be an object.",
                             "Use {e,n,z} for survey or {x,y,z} for internal."));
-                    double a = GetNum(d, mode == "internal" ? "x" : "e");
-                    double b = GetNum(d, mode == "internal" ? "y" : "n");
-                    double zz = GetNum(d, "z");
+                    var firstKey = mode == "internal" ? "x" : "e";
+                    var secondKey = mode == "internal" ? "y" : "n";
+                    if (!TryGetFiniteNumber(d, firstKey, out var a)
+                        || !TryGetFiniteNumber(d, secondKey, out var b)
+                        || !TryGetFiniteNumber(d, "z", out var zz))
+                        return Task.FromResult(CommandResult.Fail(
+                            $"Point at index {pointIndex} is missing a finite numeric {firstKey}, {secondKey}, or z value.",
+                            mode == "internal"
+                                ? "Provide every point as {\"x\":number,\"y\":number,\"z\":number} in raw Revit feet."
+                                : "Provide every point as {\"e\":number,\"n\":number,\"z\":number} in the selected survey unit."));
                     pts.Add(toInternal(a, b, zz));
                     surveyForVerify.Add(new[] { a, b, zz });
                 }
 
+                var firstNonZeroSegment = -1;
+                for (int i = 0; i < pts.Count - 1; i++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (pts[i].DistanceTo(pts[i + 1]) >= 1e-6)
+                    {
+                        firstNonZeroSegment = i;
+                        break;
+                    }
+                }
+                if (firstNonZeroSegment < 0)
+                    return Task.FromResult(CommandResult.Fail(
+                        "All requested pipe segments have zero length.",
+                        "Provide at least two distinct points."));
+
                 // ─── reference level: nearest by elevation, or named ───
+                var levels = new FilteredElementCollector(doc)
+                    .OfClass(typeof(Level))
+                    .Cast<Level>()
+                    .ToList();
+                if (levels.Count == 0)
+                    return Task.FromResult(CommandResult.Fail(
+                        "No Level found in this project.",
+                        "Create a level before creating a pipe run."));
+
                 Level level;
                 var namedLevel = GetStr(parameters, "level_name", null);
                 if (!string.IsNullOrEmpty(namedLevel))
                 {
-                    level = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>()
+                    level = levels
                         .FirstOrDefault(l => l.Name.Equals(namedLevel, StringComparison.OrdinalIgnoreCase));
                     if (level == null)
                         return Task.FromResult(CommandResult.Fail(
@@ -177,21 +336,29 @@ namespace RevitMCP.CommandSet.Commands.Create
                 else
                 {
                     double avgZ = pts.Average(p => p.Z);
-                    level = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>()
+                    level = levels
                         .OrderBy(l => Math.Abs(l.Elevation - avgZ)).First();
                 }
 
                 double? diameterFt = null;
-                if (parameters.TryGetValue("diameter_mm", out var diaRaw) && diaRaw != null
-                    && double.TryParse(diaRaw.ToString(), out var diaMm) && diaMm > 0)
+                if (parameters.TryGetValue("diameter_mm", out var diaRaw) && diaRaw != null)
+                {
+                    if (!double.TryParse(diaRaw.ToString(), out var diaMm)
+                        || double.IsNaN(diaMm)
+                        || double.IsInfinity(diaMm)
+                        || diaMm <= 0)
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            $"Invalid diameter_mm '{diaRaw}'.",
+                            "Provide a finite number greater than zero in millimetres."));
+                    }
                     diameterFt = diaMm / 304.8;
-
-                bool connectElbows = GetBool(parameters, "connect_elbows", true);
+                }
 
                 cancellationToken.ThrowIfCancellationRequested();
 
                 // ─── create in one transaction ───
-                var pipeIds = new List<int>();
+                var pipeIds = new List<long>();
                 var pipes = new List<Pipe>();
                 int elbows = 0;
                 var elbowFailures = new List<string>();
@@ -202,16 +369,19 @@ namespace RevitMCP.CommandSet.Commands.Create
 
                     for (int i = 0; i < pts.Count - 1; i++)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         // skip zero-length segments
                         if (pts[i].DistanceTo(pts[i + 1]) < 1e-6) continue;
                         var pipe = Pipe.Create(doc, sysTypeId, pipeType.Id, level.Id, pts[i], pts[i + 1]);
                         if (diameterFt.HasValue)
                         {
                             var dp = pipe.get_Parameter(BuiltInParameter.RBS_PIPE_DIAMETER_PARAM);
-                            if (dp != null && !dp.IsReadOnly) dp.Set(diameterFt.Value);
+                            if (dp == null || dp.IsReadOnly || !dp.Set(diameterFt.Value))
+                                throw new InvalidOperationException(
+                                    $"Could not set diameter on pipe {pipe.Id.GetValue()}; the transaction was rolled back.");
                         }
                         pipes.Add(pipe);
-                        pipeIds.Add(pipe.Id.IntegerValue);
+                        pipeIds.Add(pipe.Id.GetValue());
                     }
 
                     doc.Regenerate();
@@ -220,6 +390,7 @@ namespace RevitMCP.CommandSet.Commands.Create
                     {
                         for (int i = 0; i < pipes.Count - 1; i++)
                         {
+                            cancellationToken.ThrowIfCancellationRequested();
                             // Shared vertex = the end of pipe[i] closest to pipe[i+1].
                             var a0 = GetEnd(pipes[i], 0);
                             var a1 = GetEnd(pipes[i], 1);
@@ -242,29 +413,95 @@ namespace RevitMCP.CommandSet.Commands.Create
                         }
                     }
 
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
                 }
 
                 // ─── post-tx verification: first point survey round-trip ───
-                Dictionary<string, object> verification = null;
-                if (pipes.Count > 0 && mode == "survey")
+                Dictionary<string, object> verification;
+                try
                 {
-                    var pl = doc.ActiveProjectLocation;
                     var firstInternal = ((pipes[0].Location as LocationCurve).Curve).GetEndPoint(0);
-                    var sp = pl.GetProjectPosition(firstInternal);
-                    double mPerFt = 0.3048;
-                    double gotE = sp.EastWest * mPerFt, gotN = sp.NorthSouth * mPerFt, gotZ = sp.Elevation * mPerFt;
-                    double expE = surveyForVerify[0][0] * (unit == "mm" ? 0.001 : 1.0);
-                    double expN = surveyForVerify[0][1] * (unit == "mm" ? 0.001 : 1.0);
-                    double expZ = surveyForVerify[0][2] * (unit == "mm" ? 0.001 : 1.0);
-                    double err = Math.Sqrt((gotE - expE) * (gotE - expE) + (gotN - expN) * (gotN - expN));
+                    if (mode == "survey")
+                    {
+                        var pl = doc.ActiveProjectLocation;
+                        var sp = pl.GetProjectPosition(firstInternal);
+                        double mPerFt = 0.3048;
+                        double gotE = sp.EastWest * mPerFt;
+                        double gotN = sp.NorthSouth * mPerFt;
+                        double gotZ = sp.Elevation * mPerFt;
+                        double expE = surveyForVerify[firstNonZeroSegment][0] * (unit == "mm" ? 0.001 : 1.0);
+                        double expN = surveyForVerify[firstNonZeroSegment][1] * (unit == "mm" ? 0.001 : 1.0);
+                        double expZ = surveyForVerify[firstNonZeroSegment][2] * (unit == "mm" ? 0.001 : 1.0);
+                        double err = Math.Sqrt(
+                            (gotE - expE) * (gotE - expE)
+                            + (gotN - expN) * (gotN - expN)
+                            + (gotZ - expZ) * (gotZ - expZ));
+                        verification = new Dictionary<string, object>
+                        {
+                            ["performed"] = true,
+                            ["first_point_expected_survey_m"] = new[] { Math.Round(expE, 4), Math.Round(expN, 4), Math.Round(expZ, 4) },
+                            ["first_point_actual_survey_m"] = new[] { Math.Round(gotE, 4), Math.Round(gotN, 4), Math.Round(gotZ, 4) },
+                            ["three_dimensional_error_m"] = Math.Round(err, 4),
+                            ["match"] = err < 0.01
+                        };
+                    }
+                    else
+                    {
+                        var expected = pts[firstNonZeroSegment];
+                        var err = firstInternal.DistanceTo(expected);
+                        verification = new Dictionary<string, object>
+                        {
+                            ["performed"] = true,
+                            ["first_point_expected_internal_ft"] = new[]
+                            {
+                                Math.Round(expected.X, 6), Math.Round(expected.Y, 6), Math.Round(expected.Z, 6)
+                            },
+                            ["first_point_actual_internal_ft"] = new[]
+                            {
+                                Math.Round(firstInternal.X, 6), Math.Round(firstInternal.Y, 6), Math.Round(firstInternal.Z, 6)
+                            },
+                            ["error_feet"] = Math.Round(err, 6),
+                            ["match"] = err < 0.01
+                        };
+                    }
+
+                    if (diameterFt.HasValue)
+                    {
+                        var diameterParameter = pipes[0].get_Parameter(
+                            BuiltInParameter.RBS_PIPE_DIAMETER_PARAM);
+                        if (diameterParameter == null)
+                            throw new InvalidOperationException(
+                                "Created pipe has no diameter parameter for verification.");
+                        var actualDiameterFt = diameterParameter.AsDouble();
+                        var diameterErrorFt = Math.Abs(actualDiameterFt - diameterFt.Value);
+                        var diameterMatch = diameterErrorFt < (0.1 / 304.8);
+                        verification["diameter_expected_mm"] =
+                            Math.Round(diameterFt.Value * 304.8, 3);
+                        verification["diameter_actual_mm"] =
+                            Math.Round(actualDiameterFt * 304.8, 3);
+                        verification["diameter_match"] = diameterMatch;
+                        verification["match"] =
+                            Convert.ToBoolean(verification["match"]) && diameterMatch;
+                    }
+
+                    if (connectElbows && elbowFailures.Count > 0)
+                    {
+                        verification["elbow_match"] = false;
+                        verification["match"] = false;
+                    }
+                    else if (connectElbows)
+                    {
+                        verification["elbow_match"] = true;
+                    }
+                }
+                catch (Exception verificationError)
+                {
                     verification = new Dictionary<string, object>
                     {
-                        ["performed"] = true,
-                        ["first_point_expected_survey_m"] = new[] { Math.Round(expE, 4), Math.Round(expN, 4), Math.Round(expZ, 4) },
-                        ["first_point_actual_survey_m"] = new[] { Math.Round(gotE, 4), Math.Round(gotN, 4), Math.Round(gotZ, 4) },
-                        ["horizontal_error_m"] = Math.Round(err, 4),
-                        ["match"] = err < 0.01
+                        ["performed"] = false,
+                        ["match"] = false,
+                        ["error"] = verificationError.Message
                     };
                 }
 
@@ -277,10 +514,12 @@ namespace RevitMCP.CommandSet.Commands.Create
                     ["reference_level"] = level.Name,
                     ["diameter_mm"] = diameterFt.HasValue ? (object)Math.Round(diameterFt.Value * 304.8) : "type default",
                     ["coordinate_mode"] = mode,
-                    ["coord_note"] = coordNote
+                    ["input_unit"] = unit,
+                    ["coord_note"] = coordNote,
+                    ["mutation_committed"] = true,
+                    ["verification"] = verification
                 };
                 if (elbowFailures.Count > 0) data["elbow_failures"] = elbowFailures;
-                if (verification != null) data["verification"] = verification;
 
                 return Task.FromResult(CommandResult.Ok(data));
             }
@@ -315,13 +554,17 @@ namespace RevitMCP.CommandSet.Commands.Create
         private static string GetStr(Dictionary<string, object> p, string k, string def)
             => p != null && p.TryGetValue(k, out var v) && v != null ? v.ToString() : def;
 
-        private static double GetNum(Dictionary<string, object> d, string k)
-            => d.TryGetValue(k, out var v) && v != null && double.TryParse(v.ToString(), out var n) ? n : 0.0;
-
-        private static bool GetBool(Dictionary<string, object> p, string k, bool def)
+        private static bool TryGetFiniteNumber(
+            Dictionary<string, object> values,
+            string key,
+            out double number)
         {
-            if (p == null || !p.TryGetValue(k, out var v) || v == null) return def;
-            try { return Convert.ToBoolean(v); } catch { return def; }
+            number = 0;
+            if (values == null || !values.TryGetValue(key, out var raw) || raw == null
+                || !double.TryParse(raw.ToString(), out number))
+                return false;
+            return !double.IsNaN(number) && !double.IsInfinity(number);
         }
+
     }
 }

@@ -1,145 +1,111 @@
 # AutoCAD MCP
 
-Model Context Protocol server for Autodesk AutoCAD. Sister project to
-`server/` (Revit MCP), sharing
-[`@kimminsub/mcp-cad-core`](../packages/mcp-cad-core/) for the WebSocket
-client, response-formatter overflow spill, pagination, and protocol types.
+Model Context Protocol bridge for Autodesk AutoCAD 2025. It shares the
+[`@kimminsub/mcp-cad-core`](../packages/mcp-cad-core/) transport,
+pagination, and response-safety layer with the Revit MCP server.
 
-> **Status:** Phase 4 MVP — 1 tool (`cad_ping`). Builds clean against
-> AutoCAD 2025. Manual NETLOAD verified separately. More tools land in
-> Phase 5.
+The current AutoCAD surface contains 10 tools:
+
+- Utility: `cad_ping`
+- Drawing/query: `cad_get_drawing_info`, `cad_get_layers`,
+  `cad_query_entities`, `cad_extract_table`
+- Selection: `cad_get_selected_entities`, `cad_get_selection_texts`,
+  `cad_get_selection_dimensions`, `cad_parse_grid_schedule`
+- Create: `cad_create_line`
 
 ## Architecture
 
-Same 3-layer shape as Revit MCP:
-
-```
-Claude Desktop ──stdio──▶ autocad/server/ (TypeScript MCP server)
-                              │
-                         WebSocket :8182
-                              │
-                        autocad/plugin/ (C# IExtensionApplication)
-                              │
-                        autocad/commandset/ ── reflection auto-discovery
-                              │
-                       AutoCAD .NET API (acdbmgd, acmgd, accoremgd)
+```text
+MCP client ──stdio──> autocad/server (TypeScript)
+                           |
+                      WebSocket :8182
+                           |
+                    AutoCAD plugin (C#)
+                           |
+                    CommandSet (C#)
+                           |
+                    AutoCAD .NET API
 ```
 
-Key differences from Revit:
+AutoCAD API work is marshalled with
+`Application.DocumentManager.ExecuteInCommandContextAsync`. Commands use the
+transaction supplied by the plugin, which commits successful results and
+aborts failures.
 
-| | Revit | AutoCAD |
-|---|---|---|
-| Main-thread marshaling | `Revit.Async` (3rd-party NuGet) | `Application.DocumentManager.ExecuteInCommandContextAsync` (built-in) |
-| Read transactions | Not required | Required (`tr.GetObject(id, OpenMode.ForRead)`) |
-| Loading | `revit.addin` XML manifest | `NETLOAD` command or autoloader bundle (`*.bundle/PackageContents.xml`) |
-| Default WS port | 8181 | 8182 |
+## Requirements
+
+- AutoCAD 2025
+- .NET 8 SDK
+- Node.js 20 or newer
+
+Only AutoCAD 2025 is currently built and tested. Do not assume binary
+compatibility with another AutoCAD release.
 
 ## Build
 
-```bash
-# TypeScript server (from repo root — uses npm workspaces)
+From the repository root:
+
+```powershell
+npm ci --workspaces --include-workspace-root
 npm run build:autocad
 
-# C# plugin (requires AutoCAD 2025 installed at default path,
-# or set AUTOCAD_2025_PATH env var)
-dotnet build autocad/AutoCADMCP.sln -c Release
+# Uses installed AutoCAD 2025 assemblies when present. CI falls back to
+# Autodesk's compile-only AutoCAD.NET NuGet package.
+$env:AUTOCAD_2025_PATH = "C:\Program Files\Autodesk\AutoCAD 2025"
+dotnet build autocad\AutoCADMCP.sln -c Release
 ```
 
-## Loading the plugin into AutoCAD (Phase 4 — manual NETLOAD)
+## Load and connect
 
-1. Open AutoCAD 2025 with any drawing (`acad.exe`).
-2. At the command line, type `NETLOAD` and press Enter.
-3. Browse to:
-   ```
-   <repo>\autocad\plugin\AutoCADMCPPlugin\bin\Release\net8.0-windows\AutoCADMCPPlugin.dll
-   ```
-4. The command line should print:
-   ```
-   [AutoCADMCP] WebSocket server listening on :8182
-   ```
-5. Verify externally:
-   ```bash
-   curl http://127.0.0.1:8182/
-   # → {"status":"ok","server":"autocad-mcp-plugin"}
-   ```
+There is not yet a public AutoCAD installer. The AutoCAD TypeScript server is
+also a private workspace package for now; it is built and package-tested in CI
+but is not published to npm. For local development:
 
-A proper autoloader bundle (`%APPDATA%\Autodesk\ApplicationPlugins\AutoCADMCP.bundle\`)
-with `PackageContents.xml` arrives in Phase 5 — same auto-update flow as
-the Revit plugin, routed through `RevitMCPUpdater.exe --product autocad`.
+1. Run `NETLOAD` in AutoCAD 2025.
+2. Select
+   `autocad\plugin\AutoCADMCPPlugin\bin\Release\net8.0-windows\AutoCADMCPPlugin.dll`.
+3. Start the TypeScript MCP server with
+   `node autocad\server\dist\index.js`.
 
-## Smoke test (no AutoCAD needed)
+The plugin listens only on loopback and defaults to `127.0.0.1:8182`.
+WebSocket upgrades require the shared local bearer token stored at
+`%LOCALAPPDATA%\RevitMCP\auth-token`. The TypeScript server reads this file
+automatically; `REVIT_MCP_AUTH_TOKEN` can override it for both CAD bridges.
 
-```bash
-node autocad/scripts/smoke-test-server.mjs
+Direct authenticated probe:
+
+```powershell
+$env:MCP_PORT = "8182"
+node scripts\test-ws.js ping
 ```
 
-Verifies that the rebuilt server loads, `AcadWebSocketClient` instantiates,
-`sendAndFormat` resolves, and `connect()` fails cleanly when the plugin
-isn't there. Does NOT require AutoCAD to be running.
+Use `AUTOCAD_MCP_PORT` to change both the plugin listener and the TypeScript
+client port. It must be an integer from 1 to 65535 and must be set before
+starting AutoCAD and the MCP server. Set `MCP_PORT` to the same value when
+using the shared direct-probe script.
 
-## End-to-end test (AutoCAD must be loaded with NETLOAD)
+## Verification
 
-```bash
-# Direct WebSocket probe (no MCP layer)
-node scripts/test-ws.js ping       # → uses port 8181 (Revit). For :8182, use:
-REVIT_MCP_PORT=8182 node scripts/test-ws.js ping
+Tests that do not require AutoCAD:
+
+```powershell
+npm test
+dotnet build autocad\AutoCADMCP.sln -c Release
 ```
 
-> ⚠️ `scripts/test-ws.js` reads `REVIT_MCP_PORT` (legacy name) and is
-> currently shared between products. A cleaner `cad-mcp` aware probe
-> lands in Phase 5.
+The npm test suite builds all workspaces, checks tool contracts and transport
+behavior, and installs each packed npm artifact into a clean consumer.
 
-## Why this lives inside the Revit MCP repo (for now)
+## Safety notes
 
-Phase 4 places `autocad/` as a sibling workspace inside `revit-mcp-v2`
-so the AutoCAD server can directly resolve the `@kimminsub/mcp-cad-core`
-workspace symlink — no `npm publish` ceremony, no cross-repo `file:` deps.
+- `cad_create_line` accepts an `idempotency_key`; the TypeScript bridge
+  generates one when omitted, and identical retries return the cached
+  committed result.
+- A timed-out side-effect has an uncertain outcome from the MCP client's point
+  of view. Verify the drawing and reuse the exact key returned in the MCP
+  error for an identical retry.
+- Keep customer drawing names, handles, extracted schedules, and ad-hoc
+  reconciliation scripts out of public commits.
 
-Once `mcp-cad-core` is published to npm and the AutoCAD MCP has
-stabilized (Phase 5–6), the `autocad/` directory will be lifted into
-its own [`autocad-mcp-v2`](https://github.com/mskim274/autocad-mcp-v2)
-repository via `git filter-repo`. The TypeScript server will switch to
-a regular published-package dependency at that point.
-
-## Commands
-
-| Wire name | MCP tool name | Status |
-|---|---|---|
-| `ping` | `cad_ping` | Phase 4 |
-| `get_drawing_info` | `cad_get_drawing_info` | Phase 5 |
-| `get_layers` | `cad_get_layers` | Phase 5 |
-| `query_entities` | `cad_query_entities` | Phase 5 |
-| `create_line` | `cad_create_line` | Phase 5 |
-| `extract_schedule` | `cad_extract_schedule` | Phase 6 |
-
-## Layout
-
-```
-autocad/
-├── AutoCADMCP.sln                 ← Solution (commandset + plugin)
-├── README.md                      ← This file
-├── server/                        ← TS MCP server (npm workspace)
-│   ├── package.json               ← @kimminsub/autocad-mcp
-│   └── src/
-│       ├── index.ts               ← Entry point
-│       ├── constants.ts           ← AutoCAD-specific (port 8182, log prefix)
-│       ├── services/
-│       │   ├── websocket-client.ts  ← AcadWebSocketClient (extends core)
-│       │   └── response-formatter.ts
-│       └── tools/
-│           └── utility.ts          ← cad_ping
-├── commandset/                    ← C# command implementations
-│   ├── CommandSet.csproj
-│   ├── Interfaces/
-│   │   └── ICadCommand.cs         ← Mirrors IRevitCommand
-│   └── Commands/
-│       └── PingCommand.cs
-├── plugin/                        ← C# Add-in (IExtensionApplication)
-│   └── AutoCADMCPPlugin/
-│       ├── AutoCADMCPPlugin.csproj
-│       ├── Application.cs         ← AcadMCPApp
-│       ├── AcadWebSocketServer.cs ← :8182 + main-thread marshal
-│       └── CommandDispatcher.cs   ← Reflection-based discovery
-└── scripts/
-    └── smoke-test-server.mjs      ← TS-only smoke test
-```
+See the repository [security policy](../SECURITY.md) and
+[contribution guide](../CONTRIBUTING.md) before publishing changes.

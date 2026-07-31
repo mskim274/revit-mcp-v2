@@ -13,10 +13,19 @@
     "build:server": "npm run build --workspace=server",
     "build:autocad": "npm run build --workspace=@kimminsub/autocad-mcp",
     "build": "npm run build:core && npm run build:server && npm run build:autocad",
+    "test": "npm run build && npm run test:unit && npm run test:release-scripts && npm run test:packages",
+    "test:unit": "node --test packages/mcp-cad-core/src/__tests__/core.test.mjs server/src/tools/__tests__/contracts.test.mjs autocad/server/src/tools/__tests__/contracts.test.mjs",
+    "test:release-scripts": "node --check .github/scripts/package-smoke.mjs && node --check .github/scripts/publish-npm-if-needed.mjs && node --check .github/scripts/release-state.mjs && node --check .github/scripts/verify-release-tag.mjs",
+    "test:packages": "node .github/scripts/package-smoke.mjs",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
     "dev:server": "npm run dev --workspace=server",
     "start:server": "npm run start --workspace=server",
     "start:autocad": "npm run start --workspace=@kimminsub/autocad-mcp"
   },
-  "author": "kimminsub <and.ms.kim@gmail.com>",
-  "license": "MIT"
+  "author": "mskim274",
+  "license": "MIT",
+  "packageManager": "npm@11.19.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
 }

@@ -9,8 +9,8 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
-  <!-- AutoCAD .NET API references. Local dev uses installed AutoCAD DLLs.
-       CI fallback to Nice3point.AutoCAD packages will be added in Phase 5. -->
+  <!-- AutoCAD .NET API references. Local development uses installed AutoCAD
+       DLLs; CI falls back to Autodesk's compile-only AutoCAD.NET package. -->
   <PropertyGroup>
     <AutoCAD2025Path Condition="'$(AUTOCAD_2025_PATH)' != ''">$(AUTOCAD_2025_PATH)</AutoCAD2025Path>
     <AutoCAD2025Path Condition="'$(AutoCAD2025Path)' == ''">C:\Program Files\Autodesk\AutoCAD 2025</AutoCAD2025Path>
@@ -29,6 +29,13 @@
       <HintPath>$(AutoCAD2025Path)\acmgd.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="!Exists('$(AutoCAD2025Path)\accoremgd.dll')">
+    <PackageReference Include="AutoCAD.NET" Version="25.0.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>compile; build; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
 </Project>

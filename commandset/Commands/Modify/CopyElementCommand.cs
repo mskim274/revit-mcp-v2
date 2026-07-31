@@ -65,16 +65,28 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 var dx = Convert.ToDouble(dxObj);
                 var dy = Convert.ToDouble(dyObj);
                 var dz = parameters.TryGetValue("dz", out var dzObj) ? Convert.ToDouble(dzObj) : 0.0;
+                if (!IsFinite(dx) || !IsFinite(dy) || !IsFinite(dz))
+                    return Task.FromResult(CommandResult.Fail(
+                        "dx, dy, and dz must be finite numbers.",
+                        "Replace NaN or Infinity with finite distances in Revit internal feet."));
 
                 var translation = new XYZ(dx, dy, dz);
+                if (translation.IsZeroLength())
+                    return Task.FromResult(CommandResult.Fail(
+                        "Translation vector is zero; this would create overlapping duplicates.",
+                        "Provide a non-zero dx, dy, or dz."));
 
                 // Validate elements exist
                 var validIds = new List<ElementId>();
+                var invalidIds = new List<long>();
                 foreach (var id in elementIds)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var elem = doc.GetElement(new ElementId(id));
-                    if (elem != null) validIds.Add(new ElementId(id));
+                    var elem = doc.GetElement(ElementIdCompatibility.Create(id));
+                    if (elem != null)
+                        validIds.Add(ElementIdCompatibility.Create(id));
+                    else
+                        invalidIds.Add(id);
                 }
 
                 if (validIds.Count == 0)
@@ -88,7 +100,8 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 {
                     tx.Start();
                     newIds = ElementTransformUtils.CopyElements(doc, validIds, translation);
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
                 }
 
                 // Gather info about new elements
@@ -100,15 +113,38 @@ namespace RevitMCP.CommandSet.Commands.Modify
                     {
                         newElements.Add(new Dictionary<string, object>
                         {
-                            ["id"] = newId.IntegerValue,
+                            ["id"] = newId.GetValue(),
                             ["name"] = elem.Name ?? "",
                             ["category"] = elem.Category?.Name ?? "Unknown"
                         });
                     }
                 }
 
+                var verification = new Dictionary<string, object>();
+                try
+                {
+                    var missing = newIds
+                        .Where(id => doc.GetElement(id) == null)
+                        .Select(id => id.GetValue())
+                        .ToList();
+                    verification["performed"] = true;
+                    verification["expected_count"] = newIds.Count;
+                    verification["verified_count"] = newIds.Count - missing.Count;
+                    verification["missing_new_ids"] = missing;
+                    verification["match"] = missing.Count == 0;
+                }
+                catch (Exception verificationError)
+                {
+                    verification["performed"] = false;
+                    verification["match"] = false;
+                    verification["error"] = verificationError.Message;
+                }
+
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
+                    ["requested_count"] = elementIds.Count,
+                    ["valid_source_count"] = validIds.Count,
+                    ["invalid_ids"] = invalidIds,
                     ["copied_count"] = newIds.Count,
                     ["new_elements"] = newElements,
                     ["translation"] = new Dictionary<string, double>
@@ -119,7 +155,9 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         ["dx_mm"] = Math.Round(dx * 304.8, 1),
                         ["dy_mm"] = Math.Round(dy * 304.8, 1),
                         ["dz_mm"] = Math.Round(dz * 304.8, 1)
-                    }
+                    },
+                    ["mutation_committed"] = true,
+                    ["verification"] = verification
                 }));
             }
             catch (OperationCanceledException)
@@ -136,30 +174,39 @@ namespace RevitMCP.CommandSet.Commands.Modify
             }
         }
 
-        private List<int> ParseElementIds(object idsObj)
+        private List<long> ParseElementIds(object idsObj)
         {
-            var result = new List<int>();
+            var result = new List<long>();
             if (idsObj is IEnumerable<object> enumerable)
             {
                 foreach (var item in enumerable)
                 {
-                    if (item != null && int.TryParse(item.ToString(), out var id))
-                        result.Add(id);
+                    if (item == null || !long.TryParse(item.ToString(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{item}'.");
+                    result.Add(id);
                 }
             }
             else if (idsObj is string str)
             {
                 foreach (var part in str.Split(','))
                 {
-                    if (int.TryParse(part.Trim(), out var id))
-                        result.Add(id);
+                    if (!long.TryParse(part.Trim(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{part}'.");
+                    result.Add(id);
                 }
             }
-            else if (int.TryParse(idsObj?.ToString(), out var singleId))
+            else if (long.TryParse(idsObj?.ToString(), out var singleId) && singleId > 0)
             {
                 result.Add(singleId);
             }
-            return result;
+            else
+            {
+                throw new ArgumentException("element_ids must contain positive integer element IDs.");
+            }
+            return result.Distinct().ToList();
         }
+
+        private static bool IsFinite(double value)
+            => !double.IsNaN(value) && !double.IsInfinity(value);
     }
 }

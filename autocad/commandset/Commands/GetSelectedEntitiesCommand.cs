@@ -34,7 +34,19 @@ namespace AutoCADMCP.CommandSet.Commands
             try
             {
                 var includeGeometry = GetBool(parameters, "include_geometry", false);
-                var limit = (int)Math.Max(1, Math.Min(1000, GetLong(parameters, "limit", 500)));
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "limit",
+                        defaultValue: 500,
+                        minValue: 1,
+                        maxValue: 1000,
+                        out var limit,
+                        out var limitError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        limitError,
+                        "Pass limit as an integer from 1 through 1000."));
+                }
 
                 // Use the dispatcher-captured PICKFIRST snapshot.
                 // SelectionContext.Current is populated BEFORE
@@ -180,17 +192,50 @@ namespace AutoCADMCP.CommandSet.Commands
             dict[key] = v + 1;
         }
 
-        private static long GetLong(Dictionary<string, object> p, string key, long def)
+        private static bool TryGetBoundedInt(
+            Dictionary<string, object> p,
+            string key,
+            int defaultValue,
+            int minValue,
+            int maxValue,
+            out int value,
+            out string error)
         {
-            if (!p.TryGetValue(key, out var v) || v == null) return def;
-            return v switch
+            value = defaultValue;
+            error = null;
+            if (!p.TryGetValue(key, out var raw))
+                return true;
+
+            long parsed;
+            switch (raw)
             {
-                long l => l,
-                int i => i,
-                double dbl => (long)dbl,
-                string s when long.TryParse(s, out var sl) => sl,
-                _ => def,
-            };
+                case int i:
+                    parsed = i;
+                    break;
+                case long l:
+                    parsed = l;
+                    break;
+                case double d when !double.IsNaN(d) &&
+                                   !double.IsInfinity(d) &&
+                                   d == Math.Truncate(d) &&
+                                   d >= long.MinValue &&
+                                   d <= long.MaxValue:
+                    parsed = (long)d;
+                    break;
+                default:
+                    error = $"{key} must be an integer from {minValue} through {maxValue}.";
+                    return false;
+            }
+
+            if (parsed < minValue || parsed > maxValue)
+            {
+                error =
+                    $"{key} must be from {minValue} through {maxValue}; received {parsed}.";
+                return false;
+            }
+
+            value = (int)parsed;
+            return true;
         }
 
         private static bool GetBool(Dictionary<string, object> p, string key, bool defaultValue)

@@ -46,16 +46,16 @@ namespace RevitMCP.CommandSet.Commands.Modify
 
                 // Validate elements exist
                 var validIds = new List<ElementId>();
-                var invalidIds = new List<int>();
+                var invalidIds = new List<long>();
                 var elementNames = new List<string>();
 
                 foreach (var id in elementIds)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var elem = doc.GetElement(new ElementId(id));
+                    var elem = doc.GetElement(ElementIdCompatibility.Create(id));
                     if (elem != null)
                     {
-                        validIds.Add(new ElementId(id));
+                        validIds.Add(ElementIdCompatibility.Create(id));
                         elementNames.Add($"{elem.Name} ({elem.Category?.Name ?? "Unknown"})");
                     }
                     else
@@ -70,25 +70,46 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         "Use revit_query_elements to find valid element IDs."));
 
                 // Execute deletion in transaction
+                ICollection<ElementId> deletedIds;
                 using (var tx = new Transaction(doc, $"MCP: Delete {validIds.Count} elements"))
                 {
                     tx.Start();
-
-                    var deletedIds = doc.Delete(validIds.Select(id => id).ToList());
-
-                    tx.Commit();
-
-                    return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
-                    {
-                        ["deleted_count"] = validIds.Count,
-                        ["total_affected"] = deletedIds?.Count ?? validIds.Count,
-                        ["deleted_elements"] = elementNames,
-                        ["invalid_ids"] = invalidIds,
-                        ["warning"] = deletedIds != null && deletedIds.Count > validIds.Count
-                            ? $"Deleting {validIds.Count} elements also removed {deletedIds.Count - validIds.Count} dependent elements."
-                            : null
-                    }));
+                    deletedIds = doc.Delete(validIds);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
                 }
+
+                var verification = new Dictionary<string, object>();
+                try
+                {
+                    var remaining = validIds
+                        .Where(id => doc.GetElement(id) != null)
+                        .Select(id => id.GetValue())
+                        .ToList();
+                    verification["performed"] = true;
+                    verification["deleted_targets"] = validIds.Count - remaining.Count;
+                    verification["remaining_target_ids"] = remaining;
+                    verification["match"] = remaining.Count == 0;
+                }
+                catch (Exception verificationError)
+                {
+                    verification["performed"] = false;
+                    verification["match"] = false;
+                    verification["error"] = verificationError.Message;
+                }
+
+                return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
+                {
+                    ["deleted_count"] = validIds.Count,
+                    ["total_affected"] = deletedIds?.Count ?? validIds.Count,
+                    ["deleted_elements"] = elementNames,
+                    ["invalid_ids"] = invalidIds,
+                    ["warning"] = deletedIds != null && deletedIds.Count > validIds.Count
+                        ? $"Deleting {validIds.Count} elements also removed {deletedIds.Count - validIds.Count} dependent elements."
+                        : null,
+                    ["mutation_committed"] = true,
+                    ["verification"] = verification
+                }));
             }
             catch (OperationCanceledException)
             {
@@ -104,16 +125,17 @@ namespace RevitMCP.CommandSet.Commands.Modify
             }
         }
 
-        private List<int> ParseElementIds(object idsObj)
+        private List<long> ParseElementIds(object idsObj)
         {
-            var result = new List<int>();
+            var result = new List<long>();
 
             if (idsObj is IEnumerable<object> enumerable)
             {
                 foreach (var item in enumerable)
                 {
-                    if (item != null && int.TryParse(item.ToString(), out var id))
-                        result.Add(id);
+                    if (item == null || !long.TryParse(item.ToString(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{item}'.");
+                    result.Add(id);
                 }
             }
             else if (idsObj is string str)
@@ -121,16 +143,21 @@ namespace RevitMCP.CommandSet.Commands.Modify
                 // Handle comma-separated string
                 foreach (var part in str.Split(','))
                 {
-                    if (int.TryParse(part.Trim(), out var id))
-                        result.Add(id);
+                    if (!long.TryParse(part.Trim(), out var id) || id <= 0)
+                        throw new ArgumentException($"element_ids contains an invalid positive integer ID: '{part}'.");
+                    result.Add(id);
                 }
             }
-            else if (int.TryParse(idsObj?.ToString(), out var singleId))
+            else if (long.TryParse(idsObj?.ToString(), out var singleId) && singleId > 0)
             {
                 result.Add(singleId);
             }
 
-            return result;
+            else
+            {
+                throw new ArgumentException("element_ids must contain positive integer element IDs.");
+            }
+            return result.Distinct().ToList();
         }
     }
 }

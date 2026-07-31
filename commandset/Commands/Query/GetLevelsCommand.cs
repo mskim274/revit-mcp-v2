@@ -29,7 +29,7 @@ namespace RevitMCP.CommandSet.Commands.Query
                     .OrderBy(l => l.Elevation)
                     .Select(l => new Dictionary<string, object>
                     {
-                        ["id"] = l.Id.IntegerValue,
+                        ["id"] = l.Id.GetValue(),
                         ["name"] = l.Name,
                         ["elevation"] = Math.Round(l.Elevation, 4),
                         ["elevation_mm"] = Math.Round(UnitUtils.ConvertFromInternalUnits(l.Elevation, UnitTypeId.Millimeters), 1)

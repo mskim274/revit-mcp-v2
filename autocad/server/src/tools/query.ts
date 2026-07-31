@@ -3,6 +3,55 @@ import { z } from "zod";
 import type { AcadWebSocketClient } from "../services/websocket-client.js";
 import { sendAndFormat } from "../services/response-formatter.js";
 
+const PARSE_GRID_SCHEDULE_INPUT_SCHEMA = z
+  .object({
+    scope: z
+      .enum(["selection", "layer", "all"])
+      .optional()
+      .default("selection")
+      .describe(
+        "Where to look for the schedule. Default 'selection' (requires PICKFIRST set). 'all' iterates the whole model space — slow on large drawings."
+      ),
+    layer: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "Required layer name when scope='layer'. Case-insensitive exact match."
+      ),
+    tolerance: z
+      .number()
+      .finite()
+      .positive()
+      .optional()
+      .describe(
+        "Positive manual cluster tolerance in drawing units. Default: auto (median text height ÷ 2). Increase if rows split incorrectly, decrease if rows merge."
+      ),
+    header_tokens: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Token whitelist for header detection. Defaults to Korean structural keywords (부재기호, 단면, 상부근, 하부근, 늑근, 비고, …). Override only when working with non-standard schedules."
+      ),
+    preview_rows: z
+      .number()
+      .int()
+      .min(1)
+      .max(20)
+      .optional()
+      .describe("How many rows to include in preview_markdown. Default 8."),
+  })
+  .superRefine((value, ctx) => {
+    if (value.scope === "layer" && value.layer === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["layer"],
+        message: "layer is required when scope='layer'.",
+      });
+    }
+  });
+
 export function registerQueryTools(
   server: McpServer,
   wsClient: AcadWebSocketClient
@@ -62,7 +111,7 @@ To extract a specific table, pass its handle (from cad_query_entities entity_typ
       inputSchema: {
         handle: z.string().optional()
           .describe("Specific table entity handle (hex string, e.g. '2A4'). Omit for all tables in model space."),
-        header_row: z.number().int().min(0).optional()
+        header_row: z.number().int().min(0).max(2_147_483_647).optional()
           .describe("Row index (0-based) containing column headers. Default 0."),
         limit: z.number().int().min(1).max(20).optional()
           .describe("Max number of tables to return. Default 5."),
@@ -202,18 +251,7 @@ Returns:
 - diagnostics: entity counts, grid dimensions, tolerance used, placed/unplaced text counts
 
 Tune tolerance manually if rows merge unexpectedly (try 0.5 to 5.0 in drawing units).`,
-      inputSchema: {
-        scope: z.enum(["selection", "layer", "all"]).optional()
-          .describe("Where to look for the schedule. Default 'selection' (requires PICKFIRST set). 'all' iterates the whole model space — slow on large drawings."),
-        layer: z.string().optional()
-          .describe("Layer name when scope='layer'. Case-insensitive exact match."),
-        tolerance: z.number().optional()
-          .describe("Manual cluster tolerance in drawing units. Default: auto (median text height ÷ 2). Increase if rows split incorrectly, decrease if rows merge."),
-        header_tokens: z.array(z.string()).optional()
-          .describe("Token whitelist for header detection. Defaults to Korean structural keywords (부재기호, 단면, 상부근, 하부근, 늑근, 비고, …). Override only when working with non-standard schedules."),
-        preview_rows: z.number().int().min(1).max(20).optional()
-          .describe("How many rows to include in preview_markdown. Default 8."),
-      },
+      inputSchema: PARSE_GRID_SCHEDULE_INPUT_SCHEMA,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,

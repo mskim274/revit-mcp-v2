@@ -16,9 +16,9 @@
 | 도구 | 용도 | 설치 |
 |---|---|---|
 | **Autodesk Revit 2025** | 호스트 애플리케이션 | Autodesk 라이선스 |
-| **AutoCAD 2024+** (선택) | autocad-mcp 사용 시 | Autodesk 라이선스 |
+| **AutoCAD 2025** (선택) | autocad-mcp 사용 시 | Autodesk 라이선스 |
 | **.NET 8 SDK** | C# 플러그인 + 업데이터 빌드 | https://dotnet.microsoft.com/download |
-| **Node.js 18+** | TypeScript MCP 서버 빌드 | https://nodejs.org |
+| **Node.js 20+** | TypeScript MCP 서버 빌드 | https://nodejs.org |
 | **Git** | 저장소 클론 | https://git-scm.com |
 | **Claude Desktop** | MCP 클라이언트 | https://claude.ai/download |
 | **winget** | Windows 패키지 매니저 (Win11 기본 포함) | — |
@@ -40,8 +40,8 @@ cd revit-mcp-v2
 ## 2. Git 글로벌 설정 (한 번만)
 
 ```powershell
-git config --global user.name "mskim274"
-git config --global user.email "and.ms.kim@gmail.com"
+git config --global user.name "<your-github-username>"
+git config --global user.email "<your-email>"
 git config --global core.autocrlf true            # Windows 개행 정규화
 git config --global credential.helper manager     # 자격증명 캐싱
 git config --global init.defaultBranch main
@@ -69,7 +69,7 @@ gh auth login
 확인:
 ```powershell
 gh auth status
-# ✓ Logged in to github.com account mskim274
+# ✓ Logged in to github.com account <your-github-username>
 ```
 
 ---
@@ -174,9 +174,12 @@ notepad $cfg
 
 ### Revit 플러그인 동작 확인
 1. Revit 2025 시작 → 아무 프로젝트 열기 (또는 New Project)
+   플러그인이 `%LOCALAPPDATA%\RevitMCP\auth-token`을 생성하고 MCP
+   서버가 이 토큰을 자동으로 읽습니다.
 2. PowerShell에서:
    ```powershell
-   curl http://127.0.0.1:8181/
+   $token = Get-Content "$env:LOCALAPPDATA\RevitMCP\auth-token" -Raw
+   curl.exe -H "Authorization: Bearer $($token.Trim())" http://127.0.0.1:8181/
    # {"status":"ok","server":"revit-mcp-plugin"}
    ```
 
@@ -188,6 +191,9 @@ notepad $cfg
 ### 트러블슈팅
 - **WebSocket 응답 없음**: Revit에 프로젝트가 열려 있는지 확인 (플러그인은
   `DocumentOpened`/`DocumentCreated` 이벤트에서 시작)
+- **HTTP 401**: 플러그인과 MCP 서버가 같은
+  `%LOCALAPPDATA%\RevitMCP\auth-token` 또는 같은
+  `REVIT_MCP_AUTH_TOKEN`을 사용 중인지 확인
 - **MCP 서버 못 찾음**: `claude_desktop_config.json`의 경로에 백슬래시
   두 번 들어갔는지 확인
 - **DLL 로드 실패**: Revit → File → Options → Add-ins 탭에서 "RevitMCPPlugin"
@@ -288,8 +294,8 @@ git clone https://github.com/mskim274/revit-mcp-v2.git
 cd revit-mcp-v2
 
 # 2. Git config
-git config --global user.name "mskim274"
-git config --global user.email "and.ms.kim@gmail.com"
+git config --global user.name "<your-github-username>"
+git config --global user.email "<your-email>"
 git config --global core.autocrlf true
 git config --global credential.helper manager
 git config --global init.defaultBranch main

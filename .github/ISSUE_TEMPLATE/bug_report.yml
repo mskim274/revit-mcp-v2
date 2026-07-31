@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible defect using non-confidential data.
+title: '[Bug]: '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove project names, internal paths, model data, credentials, and
+        other confidential information before submitting.
+
+  - type: input
+    id: version
+    attributes:
+      label: Revit MCP version
+      placeholder: v0.5.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: product
+    attributes:
+      label: Host product
+      options:
+        - Revit 2025
+        - Revit 2026+ (currently unsupported)
+        - Revit 2023/2024
+        - AutoCAD
+        - MCP server only
+        - Updater
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe expected and actual behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use a blank project or synthetic fixture where possible.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Optional. Redact project data and local identity details.
+      render: text
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-data confirmation
+      options:
+        - label: I removed confidential project data, credentials, and internal paths.
+          required: true
+        - label: This is not a security vulnerability; security reports use SECURITY.md.
+          required: true

@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.DB;
@@ -25,6 +26,10 @@ namespace RevitMCP.Plugin
 
         private RevitWebSocketServer _wsServer;
         private static readonly int DefaultPort = 8181;
+        private int _serverPort = DefaultPort;
+        private int _serverStartPending;
+        private int _shutdownRequested;
+        private DateTime _nextServerRetryUtc = DateTime.MinValue;
 
         // One-shot update check state. We run the network call in OnStartup
         // (fire-and-forget) and render the dialog on the first Idling tick,
@@ -37,16 +42,22 @@ namespace RevitMCP.Plugin
         {
             try
             {
+                Interlocked.Exchange(ref _shutdownRequested, 0);
+
                 // Initialize Revit.Async — MUST be called in OnStartup
                 RevitTask.Initialize(application);
 
                 // Read port from environment variable (allows multi-instance)
                 var port = DefaultPort;
                 var portEnv = Environment.GetEnvironmentVariable("REVIT_MCP_PORT");
-                if (!string.IsNullOrEmpty(portEnv) && int.TryParse(portEnv, out var parsed))
+                if (!string.IsNullOrEmpty(portEnv) &&
+                    int.TryParse(portEnv, out var parsed) &&
+                    parsed >= 1 &&
+                    parsed <= 65535)
                 {
                     port = parsed;
                 }
+                _serverPort = port;
 
                 // Start WebSocket server when ANY document becomes active.
                 // DocumentOpened fires for existing .rvt files.
@@ -56,6 +67,7 @@ namespace RevitMCP.Plugin
                 application.ControlledApplication.DocumentOpened += OnDocumentOpened;
                 application.ControlledApplication.DocumentCreated += OnDocumentCreated;
                 application.ControlledApplication.DocumentClosing += OnDocumentClosing;
+                application.Idling += OnIdlingEnsureServer;
 
                 // Harness Engineering — Tier 1: self-update check.
                 // Runs in a background task; completion is polled from the
@@ -67,7 +79,9 @@ namespace RevitMCP.Plugin
                     _updateChecker = new UpdateChecker(
                         UpdateRepoOwner,
                         UpdateRepoName,
-                        GetCurrentPluginVersion());
+                        GetCurrentPluginVersion(),
+                        NormalizeRevitYear(
+                            application.ControlledApplication.VersionNumber));
                     _updateCheckTask = _updateChecker.CheckAsync();
                     application.Idling += OnIdlingShowUpdateDialog;
                 }
@@ -92,10 +106,14 @@ namespace RevitMCP.Plugin
 
         public Result OnShutdown(UIControlledApplication application)
         {
+            Interlocked.Exchange(ref _shutdownRequested, 1);
             _wsServer?.Stop();
+            _wsServer = null;
+            _updateChecker?.Dispose();
             application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
             application.ControlledApplication.DocumentCreated -= OnDocumentCreated;
             application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
+            application.Idling -= OnIdlingEnsureServer;
             application.Idling -= OnIdlingShowUpdateDialog;
 
             System.Diagnostics.Debug.WriteLine("[RevitMCP] Plugin shut down.");
@@ -119,29 +137,78 @@ namespace RevitMCP.Plugin
         /// </summary>
         private void StartWebSocketServerIfNeeded()
         {
-            if (_wsServer != null) return; // Already running
+            if (Volatile.Read(ref _shutdownRequested) != 0) return;
+            if (_wsServer != null) return;
+            if (Interlocked.Exchange(ref _serverStartPending, 1) != 0) return;
 
             try
             {
-                var port = DefaultPort;
-                var portEnv = Environment.GetEnvironmentVariable("REVIT_MCP_PORT");
-                if (!string.IsNullOrEmpty(portEnv) && int.TryParse(portEnv, out var parsed))
-                {
-                    port = parsed;
-                }
-
                 // Get UIApplication through Revit.Async
-                RevitTask.RunAsync((uiApp) =>
+                var startTask = RevitTask.RunAsync((uiApp) =>
                 {
-                    _wsServer = new RevitWebSocketServer(uiApp, port);
-                    _wsServer.Start();
+                    if (Volatile.Read(ref _shutdownRequested) != 0) return;
+                    if (_wsServer != null) return;
+
+                    var candidate = new RevitWebSocketServer(uiApp, _serverPort);
+                    if (candidate.Start())
+                    {
+                        _wsServer = candidate;
+                    }
+                    else
+                    {
+                        candidate.Stop();
+                        _nextServerRetryUtc = DateTime.UtcNow.AddSeconds(2);
+                    }
                 });
+
+                _ = startTask.ContinueWith(
+                    completed =>
+                    {
+                        Interlocked.Exchange(ref _serverStartPending, 0);
+                        if (completed.IsFaulted)
+                        {
+                            _nextServerRetryUtc = DateTime.UtcNow.AddSeconds(2);
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[RevitMCP] Failed to start server: " +
+                                $"{completed.Exception?.GetBaseException().Message}");
+                        }
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
             }
             catch (Exception ex)
             {
+                Interlocked.Exchange(ref _serverStartPending, 0);
                 System.Diagnostics.Debug.WriteLine(
                     $"[RevitMCP] Failed to start server: {ex.Message}");
             }
+        }
+
+        private void OnIdlingEnsureServer(object sender, IdlingEventArgs e)
+        {
+            if (!(sender is UIApplication uiApplication))
+                return;
+
+            if (Volatile.Read(ref _shutdownRequested) != 0)
+            {
+                uiApplication.Idling -= OnIdlingEnsureServer;
+                return;
+            }
+
+            if (_wsServer != null)
+            {
+                uiApplication.Idling -= OnIdlingEnsureServer;
+                return;
+            }
+
+            if (uiApplication.ActiveUIDocument == null ||
+                DateTime.UtcNow < _nextServerRetryUtc)
+            {
+                return;
+            }
+
+            StartWebSocketServerIfNeeded();
         }
 
         private void OnDocumentClosing(object sender, Autodesk.Revit.DB.Events.DocumentClosingEventArgs e)
@@ -216,6 +283,24 @@ namespace RevitMCP.Plugin
             {
                 return new Version(0, 0, 0);
             }
+        }
+
+        private static string NormalizeRevitYear(string versionNumber)
+        {
+            if (!string.IsNullOrWhiteSpace(versionNumber))
+            {
+                var trimmed = versionNumber.Trim();
+                if (trimmed.Length >= 4 &&
+                    int.TryParse(trimmed.Substring(0, 4), out var year) &&
+                    year >= 2000 &&
+                    year <= 9999)
+                {
+                    return year.ToString();
+                }
+            }
+
+            throw new InvalidOperationException(
+                $"Could not determine the running Revit year from '{versionNumber}'.");
         }
     }
 }

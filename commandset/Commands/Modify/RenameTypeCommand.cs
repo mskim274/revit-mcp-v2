@@ -39,7 +39,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         "Missing required parameter: new_name",
                         "Provide a unique new name for the type."));
 
-                var typeId = Convert.ToInt32(idObj);
+                var typeId = Convert.ToInt64(idObj);
                 var newName = nameObj.ToString().Trim();
 
                 if (string.IsNullOrEmpty(newName))
@@ -47,7 +47,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
                         "new_name cannot be empty.",
                         "Provide a non-empty type name."));
 
-                var typeEl = doc.GetElement(new ElementId(typeId)) as ElementType;
+                var typeEl = doc.GetElement(ElementIdCompatibility.Create(typeId)) as ElementType;
                 if (typeEl == null)
                     return Task.FromResult(CommandResult.Fail(
                         $"Element {typeId} is not an ElementType — cannot rename as type.",
@@ -66,6 +66,7 @@ namespace RevitMCP.CommandSet.Commands.Modify
                     }));
                 }
 
+                cancellationToken.ThrowIfCancellationRequested();
                 using (var tx = new Transaction(doc, $"MCP: Rename type → {newName}"))
                 {
                     tx.Start();
@@ -80,7 +81,26 @@ namespace RevitMCP.CommandSet.Commands.Modify
                             $"Cannot rename to '{newName}' — name conflict or invalid characters.",
                             "Choose a unique name in this family/category. Avoid : { } | \\ / < > ? * etc."));
                     }
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
+                }
+
+                var verification = new Dictionary<string, object>();
+                try
+                {
+                    var actual = doc.GetElement(typeEl.Id) as ElementType;
+                    verification["performed"] = true;
+                    verification["actual_name"] = actual?.Name ?? "(missing)";
+                    verification["name_match"] = actual != null
+                        && actual.Name.Equals(newName, StringComparison.Ordinal);
+                    verification["match"] = actual != null
+                        && actual.Name.Equals(newName, StringComparison.Ordinal);
+                }
+                catch (Exception verificationError)
+                {
+                    verification["performed"] = false;
+                    verification["match"] = false;
+                    verification["error"] = verificationError.Message;
                 }
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
@@ -90,6 +110,8 @@ namespace RevitMCP.CommandSet.Commands.Modify
                     ["new_name"] = typeEl.Name,
                     ["family_name"] = typeEl.FamilyName,
                     ["category"] = typeEl.Category?.Name ?? "(unknown)",
+                    ["mutation_committed"] = true,
+                    ["verification"] = verification,
                 }));
             }
             catch (Exception ex)

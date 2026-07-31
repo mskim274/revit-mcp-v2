@@ -21,6 +21,9 @@ export interface CommandError {
   message: string;
   recoverable: boolean;
   suggestion?: string;
+  // Present for a dispatched side effect so an agent can safely retry an
+  // uncertain outcome with the exact same key.
+  idempotency_key?: string;
 }
 
 export interface CommandProgress {
@@ -32,7 +35,10 @@ export interface CommandProgress {
 export type ErrorCode =
   | "CONNECTION_ERROR"
   | "TIMEOUT_ERROR"
+  | "SERVER_SHUTDOWN"
   | "REVIT_API_ERROR"
+  | "CAD_API_ERROR"
+  | "IDEMPOTENCY_CONFLICT"
   | "VALIDATION_ERROR"
   | "INTERNAL_ERROR";
 

@@ -12,9 +12,9 @@ namespace AutoCADMCP.CommandSet.Interfaces
     /// Commands that need the selection read SelectionContext.Current
     /// instead of calling Editor.SelectImplied() themselves.
     ///
-    /// Thread model: WebSocket handler is single-flight (one in-flight
-    /// command per connection), so a plain static is fine. If we ever
-    /// support concurrent connections, switch to AsyncLocal.
+    /// Thread model: AcadWebSocketServer serializes every command-context
+    /// dispatch across all WebSocket connections. The plain static snapshot
+    /// is therefore scoped safely to the one active command.
     /// </summary>
     public static class SelectionContext
     {

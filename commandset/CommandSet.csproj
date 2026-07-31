@@ -16,7 +16,7 @@
        (e.g., v0.2.0 → 0.2.0.0). Required for the auto-update check to
        compare the running plugin against GitHub Releases. -->
   <ItemGroup>
-    <PackageReference Include="MinVer" Version="5.*">
+    <PackageReference Include="MinVer" Version="5.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
@@ -40,11 +40,11 @@
 
   <!-- Revit 2023/2024 — CI fallback -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net48' AND '$(REVIT_2023_PATH)' == ''">
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2023.*" PrivateAssets="all" />
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2023.*" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2023.1.90" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2023.1.90" PrivateAssets="all" />
   </ItemGroup>
 
-  <!-- Revit 2025+ (.NET 8.0) — local -->
+  <!-- Revit 2025 (.NET 8.0) — local -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' != ''">
     <Reference Include="RevitAPI">
       <HintPath>$(REVIT_2025_PATH)\RevitAPI.dll</HintPath>
@@ -58,11 +58,11 @@
 
   <!-- Revit 2025 — CI fallback -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' == ''">
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.*" PrivateAssets="all" />
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2025.*" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.4.50" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2025.4.50" PrivateAssets="all" />
   </ItemGroup>
 
-  <!-- Roslyn C# scripting for execute_script (Revit 2025+ / net8 only).
+  <!-- Roslyn C# scripting for execute_script (Revit 2025 / net8 only).
        net48 builds compile a stub that reports "not supported" —
        see ExecuteScriptCommand.cs #if NETFRAMEWORK branch. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">

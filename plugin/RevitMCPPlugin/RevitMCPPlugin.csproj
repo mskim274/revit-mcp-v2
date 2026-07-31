@@ -16,7 +16,7 @@
 
   <!-- MinVer: git tag → AssemblyVersion. See CommandSet.csproj for notes. -->
   <ItemGroup>
-    <PackageReference Include="MinVer" Version="5.*">
+    <PackageReference Include="MinVer" Version="5.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
@@ -40,11 +40,11 @@
 
   <!-- Revit 2023/2024 — CI fallback -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net48' AND '$(REVIT_2023_PATH)' == ''">
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2023.*" PrivateAssets="all" />
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2023.*" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2023.1.90" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2023.1.90" PrivateAssets="all" />
   </ItemGroup>
 
-  <!-- Revit 2025+ (.NET 8.0) — local -->
+  <!-- Revit 2025 (.NET 8.0) — local -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' != ''">
     <Reference Include="RevitAPI">
       <HintPath>$(REVIT_2025_PATH)\RevitAPI.dll</HintPath>
@@ -58,14 +58,20 @@
 
   <!-- Revit 2025 — CI fallback -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' == ''">
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.*" PrivateAssets="all" />
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2025.*" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.4.50" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2025.4.50" PrivateAssets="all" />
   </ItemGroup>
 
   <!-- Runtime Dependencies -->
   <ItemGroup>
-    <PackageReference Include="Revit.Async" Version="2.*" />
-    <PackageReference Include="System.Text.Json" Version="8.*" />
+    <PackageReference Include="Revit.Async" Version="2.1.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
   </ItemGroup>
 
   <!-- Project Reference -->

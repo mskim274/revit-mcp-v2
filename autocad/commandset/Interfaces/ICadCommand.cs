@@ -24,10 +24,10 @@ namespace AutoCADMCP.CommandSet.Interfaces
         /// Application.DocumentManager.ExecuteInCommandContextAsync).
         ///
         /// Note: AutoCAD requires a Transaction even for read-only operations.
-        /// The dispatcher hands the command an already-open Transaction so
-        /// command bodies don't need to start one themselves for simple reads.
-        /// For mutations, command bodies SHOULD start their own nested
-        /// transaction (or use the supplied one and Commit before returning).
+        /// The dispatcher hands the command an already-open Transaction and
+        /// owns its lifecycle. Command bodies must not commit, abort, or start
+        /// a nested transaction: return success to commit and failure/throw to
+        /// make the dispatcher abort the whole operation.
         /// </summary>
         Task<CommandResult> ExecuteAsync(
             Database db,

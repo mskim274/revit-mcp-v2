@@ -39,8 +39,32 @@ namespace AutoCADMCP.CommandSet.Commands
             try
             {
                 var requestedHandle = GetString(parameters, "handle");
-                var headerRow = (int)GetLong(parameters, "header_row", 0);
-                var limit = (int)Math.Max(1, GetLong(parameters, "limit", 5));
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "header_row",
+                        defaultValue: 0,
+                        minValue: 0,
+                        maxValue: int.MaxValue,
+                        out var headerRow,
+                        out var headerRowError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        headerRowError,
+                        "Pass header_row as a non-negative zero-based row index, or omit it to use row 0."));
+                }
+                if (!TryGetBoundedInt(
+                        parameters,
+                        "limit",
+                        defaultValue: 5,
+                        minValue: 1,
+                        maxValue: 20,
+                        out var limit,
+                        out var limitError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        limitError,
+                        "Pass limit as an integer from 1 through 20."));
+                }
 
                 // Find Table entities in model space.
                 var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
@@ -63,6 +87,12 @@ namespace AutoCADMCP.CommandSet.Commands
 
                     matched++;
                     if (tables.Count >= limit) continue; // count for total but stop collecting
+                    if (headerRow >= tbl.Rows.Count)
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            $"header_row {headerRow} is outside table {id.Handle} with {tbl.Rows.Count} rows.",
+                            $"Use a header_row from 0 through {Math.Max(0, tbl.Rows.Count - 1)} for this table."));
+                    }
 
                     tables.Add(ExtractOne(tbl, id, headerRow, cancellationToken));
                 }
@@ -184,16 +214,51 @@ namespace AutoCADMCP.CommandSet.Commands
 
         private static string GetString(Dictionary<string, object> p, string key)
             => p.TryGetValue(key, out var v) && v is string s ? s : null;
-        private static long GetLong(Dictionary<string, object> p, string key, long def)
+
+        private static bool TryGetBoundedInt(
+            Dictionary<string, object> p,
+            string key,
+            int defaultValue,
+            int minValue,
+            int maxValue,
+            out int value,
+            out string error)
         {
-            if (!p.TryGetValue(key, out var v) || v == null) return def;
-            return v switch
+            value = defaultValue;
+            error = null;
+            if (!p.TryGetValue(key, out var raw))
+                return true;
+
+            long parsed;
+            switch (raw)
             {
-                long l => l,
-                int i => i,
-                double d => (long)d,
-                _ => def,
-            };
+                case int i:
+                    parsed = i;
+                    break;
+                case long l:
+                    parsed = l;
+                    break;
+                case double d when !double.IsNaN(d) &&
+                                   !double.IsInfinity(d) &&
+                                   d == Math.Truncate(d) &&
+                                   d >= long.MinValue &&
+                                   d <= long.MaxValue:
+                    parsed = (long)d;
+                    break;
+                default:
+                    error = $"{key} must be an integer from {minValue} through {maxValue}.";
+                    return false;
+            }
+
+            if (parsed < minValue || parsed > maxValue)
+            {
+                error =
+                    $"{key} must be from {minValue} through {maxValue}; received {parsed}.";
+                return false;
+            }
+
+            value = (int)parsed;
+            return true;
         }
     }
 }

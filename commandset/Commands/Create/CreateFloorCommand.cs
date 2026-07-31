@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
+using RevitMCP.CommandSet.Helpers;
 using RevitMCP.CommandSet.Interfaces;
 
 namespace RevitMCP.CommandSet.Commands.Create
@@ -42,7 +43,105 @@ namespace RevitMCP.CommandSet.Commands.Create
                         "No parameters provided.",
                         "Provide either min_x/min_y/max_x/max_y for a rectangle, or points for a polygon."));
 
-                // Resolve level
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "structural",
+                        defaultValue: false,
+                        out var structural,
+                        out var validationError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        validationError,
+                        "Pass structural as true or false, or omit it to use false."));
+                }
+
+                // Build boundary curve loop
+                CurveLoop boundary;
+                string mode;
+                bool autoFallback = false;
+                var rectangleKeys = new[] { "min_x", "min_y", "max_x", "max_y" };
+                var rectangleCount = rectangleKeys.Count(parameters.ContainsKey);
+                var hasPoints = parameters.ContainsKey("points");
+
+                if (hasPoints && rectangleCount > 0)
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        "Choose exactly one floor boundary mode: points OR rectangle min/max, not both.",
+                        "Remove points or remove all four of min_x, min_y, max_x, and max_y."));
+                }
+
+                if (hasPoints)
+                {
+                    // Polygon mode
+                    if (!TryBuildPolygonBoundary(
+                            parameters["points"],
+                            out boundary,
+                            out validationError))
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            validationError,
+                            "Pass 3-2000 polygon points as strict {x, y} objects with finite numeric coordinates in feet."));
+                    }
+                    mode = "polygon";
+                }
+                else
+                {
+                    if (rectangleCount != rectangleKeys.Length)
+                    {
+                        var supplied = rectangleKeys
+                            .Where(parameters.ContainsKey)
+                            .ToList();
+                        return Task.FromResult(CommandResult.Fail(
+                            rectangleCount == 0
+                                ? "Missing boundary definition."
+                                : $"Incomplete rectangle boundary; supplied [{string.Join(", ", supplied)}].",
+                            "Provide either points, or all four finite rectangle bounds: min_x, min_y, max_x, max_y."));
+                    }
+
+                    if (!RawParameterValidation.TryGetRequiredFiniteDouble(
+                            parameters,
+                            "min_x",
+                            out var minX,
+                            out validationError) ||
+                        !RawParameterValidation.TryGetRequiredFiniteDouble(
+                            parameters,
+                            "min_y",
+                            out var minY,
+                            out validationError) ||
+                        !RawParameterValidation.TryGetRequiredFiniteDouble(
+                            parameters,
+                            "max_x",
+                            out var maxX,
+                            out validationError) ||
+                        !RawParameterValidation.TryGetRequiredFiniteDouble(
+                            parameters,
+                            "max_y",
+                            out var maxY,
+                            out validationError))
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            validationError,
+                            "Pass min_x, min_y, max_x, and max_y as finite numbers in feet."));
+                    }
+                    if (minX >= maxX || minY >= maxY)
+                    {
+                        return Task.FromResult(CommandResult.Fail(
+                            "Rectangle max_x/max_y must be greater than min_x/min_y.",
+                            "Swap or correct the rectangle bounds so both spans are positive."));
+                    }
+
+                    // Rectangle mode
+                    boundary = BuildRectBoundary(minX, minY, maxX, maxY);
+                    mode = "rectangle";
+                }
+
+                if (boundary == null)
+                    return Task.FromResult(CommandResult.Fail(
+                        "Invalid boundary definition — could not create valid curve loop.",
+                        "Ensure each edge is at least 0.01 feet and the polygon has no duplicate adjacent vertices or self-intersections."));
+
+                // Resolve Revit elements only after every raw boundary/option
+                // value has passed validation.
                 var levelName = parameters.TryGetValue("level_name", out var lnObj) ? lnObj?.ToString() : null;
                 Level level = ResolveLevel(doc, levelName);
                 if (level == null)
@@ -50,47 +149,12 @@ namespace RevitMCP.CommandSet.Commands.Create
                         $"Level '{levelName}' not found.",
                         "Use revit_get_levels to see available levels."));
 
-                // Resolve floor type
                 var floorTypeName = parameters.TryGetValue("floor_type", out var ftObj) ? ftObj?.ToString() : null;
                 FloorType floorType = ResolveFloorType(doc, floorTypeName);
                 if (floorType == null)
                     return Task.FromResult(CommandResult.Fail(
                         $"Floor type '{floorTypeName}' not found.",
                         "Use revit_get_types_by_category(category='Floors') to see available floor types."));
-
-                var structural = parameters.TryGetValue("structural", out var sObj) && Convert.ToBoolean(sObj);
-
-                // Build boundary curve loop
-                CurveLoop boundary;
-                string mode;
-                bool autoFallback = false;
-
-                if (parameters.ContainsKey("points"))
-                {
-                    // Polygon mode
-                    boundary = BuildPolygonBoundary(parameters["points"]);
-                    mode = "polygon";
-                }
-                else if (TryGetDouble(parameters, "min_x", out var minX) &&
-                         TryGetDouble(parameters, "min_y", out var minY) &&
-                         TryGetDouble(parameters, "max_x", out var maxX) &&
-                         TryGetDouble(parameters, "max_y", out var maxY))
-                {
-                    // Rectangle mode
-                    boundary = BuildRectBoundary(minX, minY, maxX, maxY);
-                    mode = "rectangle";
-                }
-                else
-                {
-                    return Task.FromResult(CommandResult.Fail(
-                        "Missing boundary definition.",
-                        "Provide either min_x/min_y/max_x/max_y for a rectangle, or points array for a polygon."));
-                }
-
-                if (boundary == null)
-                    return Task.FromResult(CommandResult.Fail(
-                        "Invalid boundary definition — could not create valid curve loop.",
-                        "Ensure points form a valid closed polygon with no self-intersections."));
 
                 // Harness Engineering — Tier 1: Create with auto-fallback.
                 // Known issue: rectangle mode occasionally fails with "Invalid boundary"
@@ -101,7 +165,13 @@ namespace RevitMCP.CommandSet.Commands.Create
 
                 try
                 {
-                    floor = CreateFloorInTransaction(doc, boundary, floorType, level, structural);
+                    floor = CreateFloorInTransaction(
+                        doc,
+                        boundary,
+                        floorType,
+                        level,
+                        structural,
+                        cancellationToken);
                 }
                 catch (Exception ex) when (mode == "rectangle")
                 {
@@ -112,7 +182,13 @@ namespace RevitMCP.CommandSet.Commands.Create
                     {
                         try
                         {
-                            floor = CreateFloorInTransaction(doc, fallbackBoundary, floorType, level, structural);
+                            floor = CreateFloorInTransaction(
+                                doc,
+                                fallbackBoundary,
+                                floorType,
+                                level,
+                                structural,
+                                cancellationToken);
                             boundary = fallbackBoundary;
                             autoFallback = true;
                             mode = "rectangle→polygon(auto)";
@@ -141,7 +217,7 @@ namespace RevitMCP.CommandSet.Commands.Create
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
-                    ["element_id"] = floor.Id.IntegerValue,
+                    ["element_id"] = floor.Id.GetValue(),
                     ["floor_type"] = floorType.Name,
                     ["level"] = level.Name,
                     ["mode"] = mode,
@@ -149,6 +225,7 @@ namespace RevitMCP.CommandSet.Commands.Create
                     ["approximate_area_sqm"] = Math.Round(area * 0.0929, 2),
                     ["structural"] = structural,
                     ["auto_fallback_applied"] = autoFallback,
+                    ["mutation_committed"] = true,
                     ["verification"] = verification
                 }));
             }
@@ -183,37 +260,83 @@ namespace RevitMCP.CommandSet.Commands.Create
             return loop;
         }
 
-        private CurveLoop BuildPolygonBoundary(object pointsObj)
+        private static bool TryBuildPolygonBoundary(
+            object pointsObj,
+            out CurveLoop boundary,
+            out string error)
         {
-            var points = new List<XYZ>();
-
-            if (pointsObj is IEnumerable<object> enumerable)
+            boundary = null;
+            error = null;
+            if (!(pointsObj is IEnumerable<object> enumerable))
             {
-                foreach (var item in enumerable)
-                {
-                    if (item is Dictionary<string, object> dict)
-                    {
-                        if (dict.TryGetValue("x", out var xObj) && dict.TryGetValue("y", out var yObj))
-                        {
-                            var x = Convert.ToDouble(xObj);
-                            var y = Convert.ToDouble(yObj);
-                            points.Add(new XYZ(x, y, 0));
-                        }
-                    }
-                }
+                error = "points must be an array of {x, y} objects.";
+                return false;
             }
 
-            if (points.Count < 3) return null;
+            var rawPoints = enumerable.ToList();
+            if (rawPoints.Count < 3 || rawPoints.Count > 2000)
+            {
+                error =
+                    $"points must contain 3 through 2000 vertices; received {rawPoints.Count}.";
+                return false;
+            }
+
+            var points = new List<XYZ>(rawPoints.Count);
+            for (var index = 0; index < rawPoints.Count; index++)
+            {
+                if (!(rawPoints[index] is Dictionary<string, object> dict) ||
+                    dict.Count != 2 ||
+                    !dict.ContainsKey("x") ||
+                    !dict.ContainsKey("y"))
+                {
+                    error =
+                        $"points[{index}] must be an object containing exactly finite numeric x and y fields.";
+                    return false;
+                }
+
+                if (!RawParameterValidation.TryGetRequiredFiniteDouble(
+                        dict,
+                        "x",
+                        out var x,
+                        out var coordinateError) ||
+                    !RawParameterValidation.TryGetRequiredFiniteDouble(
+                        dict,
+                        "y",
+                        out var y,
+                        out coordinateError))
+                {
+                    error = $"points[{index}]: {coordinateError}";
+                    return false;
+                }
+
+                points.Add(new XYZ(x, y, 0));
+            }
 
             var loop = new CurveLoop();
             for (int i = 0; i < points.Count; i++)
             {
                 var next = (i + 1) % points.Count;
-                if (points[i].DistanceTo(points[next]) < 0.001) continue;
-                loop.Append(Line.CreateBound(points[i], points[next]));
+                if (points[i].DistanceTo(points[next]) < 0.001)
+                {
+                    error =
+                        $"points[{i}] and points[{next}] are duplicate or too close (< 0.001 ft).";
+                    return false;
+                }
+
+                try
+                {
+                    loop.Append(Line.CreateBound(points[i], points[next]));
+                }
+                catch (Exception ex)
+                {
+                    error =
+                        $"Could not create polygon edge {i}->{next}: {ex.Message}";
+                    return false;
+                }
             }
 
-            return loop;
+            boundary = loop;
+            return true;
         }
 
         private double CalculateLoopArea(CurveLoop loop)
@@ -271,19 +394,6 @@ namespace RevitMCP.CommandSet.Commands.Create
                     ft.Name.IndexOf(typeName, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
-        private bool TryGetDouble(Dictionary<string, object> parameters, string key, out double value)
-        {
-            value = 0;
-            if (parameters == null || !parameters.TryGetValue(key, out var obj) || obj == null)
-                return false;
-            try
-            {
-                value = Convert.ToDouble(obj);
-                return true;
-            }
-            catch { return false; }
-        }
-
         /// <summary>
         /// Encapsulates the floor creation transaction so it can be retried on fallback.
         /// </summary>
@@ -292,7 +402,8 @@ namespace RevitMCP.CommandSet.Commands.Create
             CurveLoop boundary,
             FloorType floorType,
             Level level,
-            bool structural)
+            bool structural,
+            CancellationToken cancellationToken)
         {
             Floor floor;
             using (var tx = new Transaction(doc, "MCP: Create Floor"))
@@ -309,7 +420,8 @@ namespace RevitMCP.CommandSet.Commands.Create
                         param.Set(1);
                 }
 
-                tx.Commit();
+                cancellationToken.ThrowIfCancellationRequested();
+                tx.CommitOrThrow();
             }
             return floor;
         }

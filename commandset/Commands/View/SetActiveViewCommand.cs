@@ -39,8 +39,8 @@ namespace RevitMCP.CommandSet.Commands.View
                 // Try by ID first
                 if (parameters.TryGetValue("view_id", out var vidObj) && vidObj != null)
                 {
-                    var viewId = Convert.ToInt32(vidObj);
-                    var elem = doc.GetElement(new ElementId(viewId));
+                    var viewId = Convert.ToInt64(vidObj);
+                    var elem = doc.GetElement(ElementIdCompatibility.Create(viewId));
                     targetView = elem as global::Autodesk.Revit.DB.View;
 
                     if (targetView == null)
@@ -60,12 +60,20 @@ namespace RevitMCP.CommandSet.Commands.View
 
                     if (targetView == null)
                     {
-                        // Try partial match
-                        targetView = new FilteredElementCollector(doc)
+                        var partialMatches = new FilteredElementCollector(doc)
                             .OfClass(typeof(Autodesk.Revit.DB.View))
                             .Cast<Autodesk.Revit.DB.View>()
                             .Where(v => !v.IsTemplate)
-                            .FirstOrDefault(v => v.Name.IndexOf(viewName, StringComparison.OrdinalIgnoreCase) >= 0);
+                            .Where(v => v.Name.IndexOf(viewName, StringComparison.OrdinalIgnoreCase) >= 0)
+                            .OrderBy(v => v.Name)
+                            .ToList();
+                        if (partialMatches.Count > 1)
+                            return Task.FromResult(CommandResult.Fail(
+                                $"View name '{viewName}' is ambiguous and matched {partialMatches.Count} views.",
+                                "Retry with an exact view_name or view_id. Candidates: "
+                                + string.Join(", ", partialMatches.Take(10).Select(v =>
+                                    $"{v.Name} ({v.Id.GetValue()})"))));
+                        targetView = partialMatches.SingleOrDefault();
                     }
 
                     if (targetView == null)
@@ -84,7 +92,7 @@ namespace RevitMCP.CommandSet.Commands.View
                 // via UIDocument.ActiveView (requires UIApplication context)
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
-                    ["view_id"] = targetView.Id.IntegerValue,
+                    ["view_id"] = targetView.Id.GetValue(),
                     ["view_name"] = targetView.Name,
                     ["view_type"] = targetView.ViewType.ToString(),
                     ["scale"] = targetView.Scale,

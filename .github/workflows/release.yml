@@ -1,26 +1,3 @@
-# Release pipeline — tag-triggered build, package, and GitHub Release.
-#
-# Trigger: pushing a tag matching v*.*.* (e.g., v0.2.0)
-#   git tag v0.2.0
-#   git push origin v0.2.0
-#
-# Outputs:
-#   - RevitMCPPlugin-<version>-Revit2025.zip  (DLLs + .addin)
-#   - RevitMCPPlugin-<version>-Revit2023.zip  (DLLs + .addin)
-#   - RevitMCPUpdater-<version>.zip           (standalone updater)
-#   - GitHub Release with auto-generated notes
-#
-# The plugin's UpdateChecker polls /repos/<owner>/<repo>/releases/latest
-# and uses the first .zip asset matching the installed Revit year.
-#
-# Harness Engineering notes:
-#   - Builds run with empty REVIT_202x_PATH, so csproj falls back to the
-#     Nice3point.Revit.Api NuGet packages. No Revit install required on
-#     the runner.
-#   - MinVer reads the nearest git tag (fetch-depth: 0 is essential).
-#   - `permissions: contents: write` lets action-gh-release create a
-#     release against the default GITHUB_TOKEN — no PAT needed.
-
 name: Release
 
 on:
@@ -28,136 +5,459 @@ on:
     tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version override (e.g., 0.2.0). Leave empty to use the latest tag.'
-        required: false
+      tag:
+        description: 'Existing release tag in strict vMAJOR.MINOR.PATCH form'
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  build-and-release:
-    runs-on: windows-2022
-    timeout-minutes: 15
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
 
     steps:
-      - name: Checkout (with full history for MinVer)
-        uses: actions/checkout@v4
+      - name: Checkout validated release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
-      - name: Setup .NET 8 SDK
-        uses: actions/setup-dotnet@v4
+      - name: Validate strict semver tag on main
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+            [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == "$tag" ]] || {
+              echo "::error::Run: gh workflow run release.yml --ref $tag -f tag=$tag"
+              exit 1
+            }
+          else
+            [[ "$GITHUB_REF_TYPE" == "tag" ]] || {
+              echo "::error::Release pushes must be tags."
+              exit 1
+            }
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || {
+            echo "::error::Tag must match strict vMAJOR.MINOR.PATCH: $tag"
+            exit 1
+          }
+
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          commit="$(git rev-list -n 1 "${tag}^{commit}")"
+          [[ "$(git rev-parse HEAD)" == "$commit" ]] || {
+            echo "::error::Checked-out source does not match release tag $tag."
+            exit 1
+          }
+          git merge-base --is-ancestor "$commit" origin/main || {
+            echo "::error::Release tag $tag must point to a commit reachable from main."
+            exit 1
+          }
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  npm-package:
+    name: Build and verify npm packages
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Install workspaces from lockfile
+        run: npm ci --workspaces --include-workspace-root
+
+      - name: Set package versions and exact core dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pkg set "version=$RELEASE_VERSION" \
+            --workspace=@kimminsub/mcp-cad-core
+          npm pkg set "version=$RELEASE_VERSION" \
+            --workspace=server
+          npm pkg set "version=$RELEASE_VERSION" \
+            --workspace=@kimminsub/autocad-mcp
+          npm pkg set "dependencies.@kimminsub/mcp-cad-core=$RELEASE_VERSION" \
+            --workspace=server
+          npm pkg set "dependencies.@kimminsub/mcp-cad-core=$RELEASE_VERSION" \
+            --workspace=@kimminsub/autocad-mcp
+          npm install --package-lock-only --ignore-scripts
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Run unit and contract tests
+        run: npm run test:unit
+
+      - name: Validate release JavaScript tooling
+        run: npm run test:release-scripts
+
+      - name: Test packed packages in a clean consumer
+        run: npm run test:packages
+
+      - name: Audit production dependencies
+        run: npm run audit:prod
+
+      - name: Pack exact release tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/npm
+          npm pack --ignore-scripts --workspace=@kimminsub/mcp-cad-core \
+            --pack-destination=.artifacts/npm
+          npm pack --ignore-scripts --workspace=server \
+            --pack-destination=.artifacts/npm
+          test -f ".artifacts/npm/kimminsub-mcp-cad-core-$RELEASE_VERSION.tgz"
+          test -f ".artifacts/npm/kimminsub-revit-mcp-$RELEASE_VERSION.tgz"
+
+      - name: Upload npm tarballs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-packages
+          path: .artifacts/npm/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-package:
+    name: Build and verify Revit release archives
+    needs: validate
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      RELEASE_SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
+      REVIT_2023_PATH: ''
+      REVIT_2025_PATH: ''
+
+    steps:
+      - name: Checkout validated release commit with MinVer history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 8.0.x
 
-      - name: Restore dependencies
-        run: dotnet restore RevitMCP.sln
-
-      - name: Build for Revit 2025 (.NET 8)
-        run: >
-          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj
-          -c Release -f net8.0-windows --no-restore
-
-      # Revit 2023 (.NET Framework 4.8) build disabled in CI until we verify
-      # the Nice3point NuGet packages publish a net48 target asset. The code
-      # still multi-targets locally for contributors who have Revit 2023
-      # installed and REVIT_2023_PATH set.
-
-      - name: Publish updater console app
-        run: >
-          dotnet publish updater/Updater.csproj
-          -c Release -r win-x64 --self-contained false
-          -p:PublishSingleFile=true
-          -o updater/publish
-
-      - name: Package Revit 2025 zip
+      - name: Build AutoCAD plugin against NuGet API references
         shell: pwsh
+        env:
+          AUTOCAD_2025_PATH: 'C:\__autocad_sdk_not_installed__'
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}") -eq $false) {
-            $version = "${{ github.event.inputs.version }}"
-          }
-          $outDir = "plugin/RevitMCPPlugin/bin/Release/net8.0-windows"
-          $zipName = "RevitMCPPlugin-$version-Revit2025.zip"
-          $files = @(
-            "$outDir/RevitMCPPlugin.dll",
-            "$outDir/RevitMCP.CommandSet.dll",
-            "$outDir/Revit.Async.dll",
-            "plugin/revit-mcp.addin"
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project autocad/AutoCADMCP.sln
+          dotnet build autocad/AutoCADMCP.sln -c Release --no-restore
+          $output = 'autocad/plugin/AutoCADMCPPlugin/bin/Release/net8.0-windows'
+          $hostAssemblies = @(
+            Get-ChildItem -LiteralPath $output -File |
+              Where-Object Name -Match '^(acmgd|acdbmgd|accoremgd)\.dll$'
           )
-          Compress-Archive -Path $files -DestinationPath $zipName -Force
-          Write-Host "Created $zipName"
+          if ($hostAssemblies.Count -ne 0) {
+            throw "AutoCAD host assemblies must remain compile-only: $($hostAssemblies.Name -join ', ')"
+          }
 
-      # Revit 2023 zip packaging disabled — see build step note above.
-
-      - name: Package updater zip
+      - name: Build Revit 2023/2024 compatibility target
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          if ([string]::IsNullOrEmpty("${{ github.event.inputs.version }}") -eq $false) {
-            $version = "${{ github.event.inputs.version }}"
-          }
-          Compress-Archive -Path "updater/publish/*" `
-            -DestinationPath "RevitMCPUpdater-$version.zip" -Force
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project plugin/RevitMCPPlugin/RevitMCPPlugin.csproj `
+            -TargetFramework net48 `
+            -MinVerVersionOverride $env:RELEASE_VERSION
+          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj `
+            -c Release -f net48 --no-restore `
+            -p:MinVerVersionOverride=$env:RELEASE_VERSION
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Build Revit 2025 target
+        shell: pwsh
+        run: |
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project plugin/RevitMCPPlugin/RevitMCPPlugin.csproj `
+            -TargetFramework net8.0-windows `
+            -MinVerVersionOverride $env:RELEASE_VERSION
+          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj `
+            -c Release -f net8.0-windows --no-restore `
+            -p:MinVerVersionOverride=$env:RELEASE_VERSION
+
+      - name: Build and test updater
+        shell: pwsh
+        run: |
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project updater/Updater.csproj `
+            -MinVerVersionOverride $env:RELEASE_VERSION
+          dotnet build updater/Updater.csproj -c Release --no-restore `
+            -p:MinVerVersionOverride=$env:RELEASE_VERSION
+
+      - name: Run updater smoke tests
+        shell: bash
+        run: bash scripts/test-updater.sh
+
+      - name: Run updater PowerShell security tests
+        shell: pwsh
+        run: .\scripts\test-updater.ps1
+
+      - name: Publish updater
+        shell: pwsh
+        run: |
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project updater/Updater.csproj `
+            -RuntimeIdentifier win-x64 `
+            -MinVerVersionOverride $env:RELEASE_VERSION
+          dotnet publish updater/Updater.csproj `
+            -c Release -r win-x64 --self-contained false --no-restore `
+            -p:PublishSingleFile=true `
+            -p:MinVerVersionOverride=$env:RELEASE_VERSION `
+            -o updater/publish
+
+      - name: Build release archives from staged runtime output
+        shell: pwsh
+        run: .\.github\scripts\package-release.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Validate manifests, hashes, and archive contents
+        shell: pwsh
+        run: |
+          .\.github\scripts\validate-release-package.ps1 `
+            -PluginZip ".artifacts/release/RevitMCPPlugin-$env:RELEASE_VERSION-Revit2025.zip" `
+            -UpdaterZip ".artifacts/release/RevitMCPUpdater-$env:RELEASE_VERSION.zip" `
+            -Checksums '.artifacts/release/SHA256SUMS.txt' `
+            -ExpectedVersion $env:RELEASE_VERSION `
+            -ExpectedSourceCommit $env:RELEASE_SOURCE_COMMIT
+
+      - name: Upload release archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          files: |
-            RevitMCPPlugin-*-Revit2025.zip
-            RevitMCPUpdater-*.zip
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
+          name: release-archives
+          path: |
+            .artifacts/release/*.zip
+            .artifacts/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  prepare-draft-release:
+    name: Prepare verified draft GitHub Release
+    needs: [validate, npm-package, windows-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Verify release tag still targets the validated commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          node .github/scripts/verify-release-tag.mjs
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+
+      - name: Download verified release archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-archives
+          path: .artifacts/release
+
+      - name: Create or verify draft release and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          node .github/scripts/release-state.mjs prepare
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+          ".artifacts/release"
 
   publish-npm:
-    # Publishes the TypeScript MCP server to npm as @mskim274/revit-mcp so
-    # end users can install the Claude-facing half with a single `npx`
-    # entry in their claude_desktop_config.json. Runs in parallel with the
-    # plugin build on a Linux runner (faster, cheaper).
+    name: Publish core, then Revit MCP, with npm OIDC
+    needs:
+      - validate
+      - npm-package
+      - windows-package
+      - prepare-draft-release
+      - attest-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+
+    steps:
+      - name: Checkout trusted publisher workflow
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Setup Node.js for npm trusted publishing
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Verify npm supports trusted publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_version="$(npm --version)"
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            if (
+              major < 11 ||
+              (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))
+            ) {
+              throw new Error(`npm ${process.argv[1]} is too old for trusted publishing`);
+            }
+          ' "$npm_version"
+
+      - name: Download verified npm tarballs
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: npm-packages
+          path: .artifacts/npm
+
+      - name: Publish shared core first
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          node .github/scripts/verify-release-tag.mjs
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+          &&
+          node .github/scripts/publish-npm-if-needed.mjs
+          ".artifacts/npm/kimminsub-mcp-cad-core-$RELEASE_VERSION.tgz"
+          "@kimminsub/mcp-cad-core"
+          "$RELEASE_VERSION"
+
+      - name: Publish Revit MCP second
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          node .github/scripts/verify-release-tag.mjs
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+          &&
+          node .github/scripts/publish-npm-if-needed.mjs
+          ".artifacts/npm/kimminsub-revit-mcp-$RELEASE_VERSION.tgz"
+          "@kimminsub/revit-mcp"
+          "$RELEASE_VERSION"
+
+  attest-release:
+    name: Attest release archives
+    needs: [validate, prepare-draft-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
+      id-token: write
+      attestations: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Download verified release archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-archives
+          path: .artifacts/release
+
+      - name: Generate GitHub artifact attestations
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: '.artifacts/release/*.zip'
+
+  finalize-github-release:
+    name: Verify npm state and publish GitHub Release
+    needs:
+      - validate
+      - prepare-draft-release
+      - attest-release
+      - publish-npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
 
-      # npm workspace lock + node_modules live at the repo root, not in
-      # server/. `npm ci --workspaces` hydrates all workspace packages.
-      - name: Install dependencies (root, workspace-aware)
-        run: npm ci --workspaces --include-workspace-root
+      - name: Download attested release archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-archives
+          path: .artifacts/release
 
-      - name: Build server workspace
-        run: npm run build --workspace=server
-
-      - name: Sync package version with git tag
-        shell: bash
-        run: |
-          # Strip the leading 'v' from the tag (v0.4.0 → 0.4.0). On
-          # workflow_dispatch without a tag we fall back to whatever is
-          # already in package.json.
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VERSION="${{ github.event.inputs.version }}"
-          fi
-          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            echo "Setting npm version to $VERSION"
-            npm version "$VERSION" --no-git-tag-version --allow-same-version --workspace=server
-          else
-            echo "No semver tag detected (GITHUB_REF_NAME=$GITHUB_REF_NAME); keeping package.json version."
-          fi
-
-      - name: Publish to npm
-        run: npm publish --access public --workspace=server
+      - name: Verify release tag still targets the validated commit
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          node .github/scripts/verify-release-tag.mjs
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+
+      - name: Verify both npm packages and publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          node .github/scripts/release-state.mjs finalize
+          "${{ needs.validate.outputs.tag }}"
+          "${{ needs.validate.outputs.commit }}"
+          ".artifacts/release"

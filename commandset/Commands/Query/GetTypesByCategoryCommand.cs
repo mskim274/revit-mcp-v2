@@ -39,35 +39,49 @@ namespace RevitMCP.CommandSet.Commands.Query
                         $"Unknown category: '{categoryName}'",
                         "Use revit_get_all_categories to see valid names."));
 
-                var types = new FilteredElementCollector(doc)
+                cancellationToken.ThrowIfCancellationRequested();
+                var elementTypes = new FilteredElementCollector(doc)
                     .OfCategory(builtInCat)
                     .WhereElementIsElementType()
+                    .ToElements()
                     .OrderBy(t => t.Name)
-                    .Select(t =>
-                    {
-                        var info = new Dictionary<string, object>
-                        {
-                            ["id"] = t.Id.IntegerValue,
-                            ["name"] = t.Name
-                        };
-
-                        if (t is ElementType et)
-                            info["family_name"] = et.FamilyName ?? "";
-
-                        if (t is FamilySymbol fs)
-                            info["is_active"] = fs.IsActive;
-
-                        // Count instances using this type
-                        var instanceCount = new FilteredElementCollector(doc)
-                            .OfCategory(builtInCat)
-                            .WhereElementIsNotElementType()
-                            .Where(e => e.GetTypeId() == t.Id)
-                            .Count();
-                        info["instance_count"] = instanceCount;
-
-                        return info;
-                    })
+                    .ThenBy(t => t.Id.GetValue())
                     .ToList();
+
+                var instanceCounts = new Dictionary<ElementId, int>();
+                foreach (var instance in new FilteredElementCollector(doc)
+                    .OfCategory(builtInCat)
+                    .WhereElementIsNotElementType())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var typeId = instance.GetTypeId();
+                    if (typeId == null || typeId == ElementId.InvalidElementId) continue;
+                    instanceCounts[typeId] = instanceCounts.TryGetValue(typeId, out var count)
+                        ? count + 1
+                        : 1;
+                }
+
+                var types = new List<Dictionary<string, object>>(elementTypes.Count);
+                foreach (var t in elementTypes)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var info = new Dictionary<string, object>
+                    {
+                        ["id"] = t.Id.GetValue(),
+                        ["name"] = t.Name
+                    };
+
+                    if (t is ElementType et)
+                        info["family_name"] = et.FamilyName ?? "";
+
+                    if (t is FamilySymbol fs)
+                        info["is_active"] = fs.IsActive;
+
+                    info["instance_count"] = instanceCounts.TryGetValue(t.Id, out var instanceCount)
+                        ? instanceCount
+                        : 0;
+                    types.Add(info);
+                }
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {

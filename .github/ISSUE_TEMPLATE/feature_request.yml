@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a bounded, AI-first Revit or AutoCAD capability.
+title: '[Feature]: '
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the workflow problem without confidential project data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed tool contract
+      description: Include inputs, matching semantics, units, limits, and output shape.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and verification
+      description: Explain transactions, idempotency, batching, and post-write verification.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: data
+    attributes:
+      label: Public-data confirmation
+      options:
+        - label: This request contains no confidential model, drawing, or company data.
+          required: true

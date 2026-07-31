@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
+using RevitMCP.CommandSet.Helpers;
 using RevitMCP.CommandSet.Interfaces;
 
 namespace RevitMCP.CommandSet.Commands.Create
@@ -38,15 +39,64 @@ namespace RevitMCP.CommandSet.Commands.Create
                         "No parameters provided.",
                         "Provide start_x, start_y, end_x, end_y at minimum."));
 
-                // Parse required coordinates
-                if (!TryGetDouble(parameters, "start_x", out var startX) ||
-                    !TryGetDouble(parameters, "start_y", out var startY) ||
-                    !TryGetDouble(parameters, "end_x", out var endX) ||
-                    !TryGetDouble(parameters, "end_y", out var endY))
+                // Validate every raw value before resolving Revit elements or
+                // opening a transaction. The TypeScript layer performs the
+                // same finite-number/strict-boolean checks, but raw WebSocket
+                // callers must not bypass them.
+                if (!RawParameterValidation.TryGetRequiredFiniteDouble(
+                        parameters,
+                        "start_x",
+                        out var startX,
+                        out var validationError) ||
+                    !RawParameterValidation.TryGetRequiredFiniteDouble(
+                        parameters,
+                        "start_y",
+                        out var startY,
+                        out validationError) ||
+                    !RawParameterValidation.TryGetRequiredFiniteDouble(
+                        parameters,
+                        "end_x",
+                        out var endX,
+                        out validationError) ||
+                    !RawParameterValidation.TryGetRequiredFiniteDouble(
+                        parameters,
+                        "end_y",
+                        out var endY,
+                        out validationError))
                 {
                     return Task.FromResult(CommandResult.Fail(
-                        "Missing required coordinates: start_x, start_y, end_x, end_y",
-                        "All coordinates are in feet. Use revit_get_element_info on existing walls to see coordinate ranges."));
+                        validationError,
+                        "Provide finite numeric start_x, start_y, end_x, and end_y values in feet."));
+                }
+
+                if (!RawParameterValidation.TryGetOptionalFiniteDouble(
+                        parameters,
+                        "height",
+                        defaultValue: 10.0,
+                        out var height,
+                        out validationError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        validationError,
+                        "Pass height as a finite number greater than zero in feet, or omit it to use 10 feet."));
+                }
+                if (height <= 0)
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        $"height must be greater than zero; received {height}.",
+                        "Pass a positive wall height in feet."));
+                }
+
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "structural",
+                        defaultValue: false,
+                        out var structural,
+                        out validationError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        validationError,
+                        "Pass structural as true or false, or omit it to use false."));
                 }
 
                 var startPoint = new XYZ(startX, startY, 0);
@@ -75,10 +125,6 @@ namespace RevitMCP.CommandSet.Commands.Create
                         $"Wall type '{wallTypeName}' not found.",
                         "Use revit_get_types_by_category(category='Walls') to see available wall types."));
 
-                // Optional parameters
-                var height = TryGetDouble(parameters, "height", out var h) ? h : 10.0;
-                var structural = parameters.TryGetValue("structural", out var sObj) && Convert.ToBoolean(sObj);
-
                 // Create wall
                 Wall wall;
                 using (var tx = new Transaction(doc, "MCP: Create Wall"))
@@ -87,7 +133,8 @@ namespace RevitMCP.CommandSet.Commands.Create
 
                     wall = Wall.Create(doc, line, wallType.Id, level.Id, height, 0, false, structural);
 
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    tx.CommitOrThrow();
                 }
 
                 // Harness Engineering — Tier 1: Post-transaction verification.
@@ -104,7 +151,7 @@ namespace RevitMCP.CommandSet.Commands.Create
                 // Return info about the created wall
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
-                    ["element_id"] = wall.Id.IntegerValue,
+                    ["element_id"] = wall.Id.GetValue(),
                     ["wall_type"] = wallType.Name,
                     ["level"] = level.Name,
                     ["height_feet"] = height,
@@ -120,6 +167,7 @@ namespace RevitMCP.CommandSet.Commands.Create
                     {
                         ["x"] = endX, ["y"] = endY
                     },
+                    ["mutation_committed"] = true,
                     ["verification"] = verification
                 }));
             }
@@ -169,19 +217,6 @@ namespace RevitMCP.CommandSet.Commands.Create
                 wt.Name.Equals(typeName, StringComparison.OrdinalIgnoreCase))
                 ?? wallTypes.FirstOrDefault(wt =>
                     wt.Name.IndexOf(typeName, StringComparison.OrdinalIgnoreCase) >= 0);
-        }
-
-        private bool TryGetDouble(Dictionary<string, object> parameters, string key, out double value)
-        {
-            value = 0;
-            if (parameters == null || !parameters.TryGetValue(key, out var obj) || obj == null)
-                return false;
-            try
-            {
-                value = Convert.ToDouble(obj);
-                return true;
-            }
-            catch { return false; }
         }
 
         /// <summary>

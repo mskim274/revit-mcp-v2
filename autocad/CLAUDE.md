@@ -26,10 +26,9 @@ AutoCAD-specific deltas.
   thread. Used by `AcadWebSocketServer.DispatchSafely`.
 - **Read transactions are required.** Even pure queries must use
   `tr.GetObject(id, OpenMode.ForRead)` inside a `StartTransaction()` block.
-  The dispatcher gives every command an already-open `Transaction`; commit
-  happens automatically after `ExecuteAsync` returns. Mutations should
-  start their own nested transaction (or commit the supplied one and
-  return).
+  The dispatcher gives every command an already-open `Transaction`; it
+  commits only a successful `CommandResult` and aborts failures/exceptions.
+  Commands must not commit, abort, or start a nested transaction themselves.
 
 ### Loading
 
@@ -38,7 +37,8 @@ AutoCAD-specific deltas.
 - **Autoloader bundle (auto)** — drop a `<name>.bundle/` folder into
   `%APPDATA%\Autodesk\ApplicationPlugins\` containing a
   `PackageContents.xml` manifest. AutoCAD scans this folder on startup
-  and loads matching versions. The auto-update flow lands in Phase 5.
+  and loads matching versions. The updater can install a prepared AutoCAD
+  bundle, but the public release workflow does not yet ship one.
 - **No GUID in the manifest** the way Revit's `.addin` requires — but
   bundle name uniqueness still matters (the assembly's GUID
   `9D1A7F0D-64F2-46A9-BF8A-E37D608EB229` was issued fresh, do not reuse).
@@ -68,9 +68,8 @@ with two adjustments:
    `autocad/commandset/Commands/<Name>Command.cs`.
 2. ExecuteAsync signature takes `(Database db, Transaction tr,
    Dictionary<string, object> parameters, CancellationToken ct)`. The
-   `tr` is supplied open by the dispatcher — for reads, just use it. For
-   mutations, prefer starting your own nested transaction so partial
-   success is contained.
+   `tr` is supplied open by the dispatcher; use it for reads and writes, then
+   return success or failure so the dispatcher owns commit/abort atomically.
 
 TypeScript tool registration is identical (`cad_` prefix instead of
 `revit_`, register from `autocad/server/src/tools/<category>.ts`).
@@ -93,10 +92,9 @@ AUTOCAD_MCP_PORT=8182 node scripts/test-ws.js ping
 
 ## Known pitfalls (specific to AutoCAD)
 
-- **`acmgd` / `acdbmgd` / `accoremgd` are mixed-mode assemblies.** The
-  csproj sets `<Private>false</Private>` so they don't get copied into
-  the output. AutoCAD itself loads them at runtime. MSBuild emits MSB3277
-  warnings about transitive references — ignore.
+- **`acmgd` / `acdbmgd` / `accoremgd` are host assemblies.** Installed
+  references use `<Private>false</Private>` and the CI fallback package is
+  compile-only, so these DLLs must never be copied into a release.
 - **`Editor.WriteMessage` may throw during plugin Initialize** if the
   document hasn't fully come up. `AcadMCPApp.WriteToEditor` catches all
   exceptions silently.

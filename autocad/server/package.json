@@ -1,7 +1,8 @@
 {
   "name": "@kimminsub/autocad-mcp",
   "version": "0.1.0",
-  "description": "Model Context Protocol server for Autodesk AutoCAD — driven by Claude and other MCP clients. Sister project to revit-mcp.",
+  "private": true,
+  "description": "Private Model Context Protocol server workspace for Autodesk AutoCAD 2025.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -22,17 +23,14 @@
     "url": "git+https://github.com/mskim274/revit-mcp-v2.git",
     "directory": "autocad/server"
   },
-  "publishConfig": {
-    "access": "public"
-  },
   "dependencies": {
-    "@kimminsub/mcp-cad-core": "*",
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "zod": "^3.24.0"
+    "@kimminsub/mcp-cad-core": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=20.0.0"

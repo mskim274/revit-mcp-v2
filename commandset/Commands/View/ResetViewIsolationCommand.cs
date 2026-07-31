@@ -29,8 +29,12 @@ namespace RevitMCP.CommandSet.Commands.View
                 global::Autodesk.Revit.DB.View view = null;
                 if (parameters != null && parameters.TryGetValue("view_id", out var vidObj) && vidObj != null)
                 {
-                    var viewId = Convert.ToInt32(vidObj);
-                    view = doc.GetElement(new ElementId(viewId)) as global::Autodesk.Revit.DB.View;
+                    var viewId = Convert.ToInt64(vidObj);
+                    view = doc.GetElement(ElementIdCompatibility.Create(viewId)) as global::Autodesk.Revit.DB.View;
+                    if (view == null)
+                        return Task.FromResult(CommandResult.Fail(
+                            $"view_id {viewId} is not a valid view.",
+                            "Use revit_get_views to choose a non-template graphical view."));
                 }
 
                 if (view == null)
@@ -44,19 +48,44 @@ namespace RevitMCP.CommandSet.Commands.View
                 // Check if there's any isolation active
                 var hasIsolation = view.IsInTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate);
 
-                using (var tx = new Transaction(doc, "MCP: Reset View Isolation"))
+                if (hasIsolation)
                 {
-                    tx.Start();
-                    view.DisableTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate);
-                    tx.Commit();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using (var tx = new Transaction(doc, "MCP: Reset View Isolation"))
+                    {
+                        tx.Start();
+                        view.DisableTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        tx.CommitOrThrow();
+                    }
+                }
+
+                var verification = new Dictionary<string, object>();
+                try
+                {
+                    var stillTemporary = view.IsInTemporaryViewMode(
+                        TemporaryViewMode.TemporaryHideIsolate);
+                    verification["performed"] = true;
+                    verification["temporary_mode_disabled"] = !stillTemporary;
+                    verification["match"] = !stillTemporary;
+                }
+                catch (Exception verificationError)
+                {
+                    verification["performed"] = false;
+                    verification["match"] = false;
+                    verification["error"] = verificationError.Message;
                 }
 
                 return Task.FromResult(CommandResult.Ok(new Dictionary<string, object>
                 {
                     ["view_name"] = view.Name,
-                    ["view_id"] = view.Id.IntegerValue,
+                    ["view_id"] = view.Id.GetValue(),
                     ["had_isolation"] = hasIsolation,
-                    ["status"] = "All elements are now visible."
+                    ["status"] = hasIsolation
+                        ? "Temporary hide/isolate mode was disabled."
+                        : "No temporary hide/isolate mode was active.",
+                    ["mutation_committed"] = hasIsolation,
+                    ["verification"] = verification
                 }));
             }
             catch (OperationCanceledException)

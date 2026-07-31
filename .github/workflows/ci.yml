@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  npm:
+    name: npm ${{ matrix.node }} build, test, audit, and package smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '24']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspaces from lockfile
+        run: npm ci --workspaces --include-workspace-root
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Run unit and contract tests
+        run: npm run test:unit
+
+      - name: Validate release JavaScript tooling
+        run: npm run test:release-scripts
+
+      - name: Test packed packages in a clean consumer
+        run: npm run test:packages
+
+      - name: Audit production dependencies
+        if: matrix.node == '24'
+        run: npm run audit:prod
+
+  dotnet-build:
+    name: .NET build (${{ matrix.framework }})
+    runs-on: windows-2022
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - net8.0-windows
+          - net48
+    env:
+      REVIT_2023_PATH: ''
+      REVIT_2025_PATH: ''
+      TARGET_FRAMEWORK: ${{ matrix.framework }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore target framework
+        shell: pwsh
+        run: >
+          .\.github\scripts\restore-dotnet-with-audit.ps1
+          -Project plugin/RevitMCPPlugin/RevitMCPPlugin.csproj
+          -TargetFramework $env:TARGET_FRAMEWORK
+
+      - name: Build target framework
+        shell: pwsh
+        run: >
+          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj
+          -c Release -f $env:TARGET_FRAMEWORK --no-restore
+
+  autocad-dotnet-build:
+    name: AutoCAD .NET build (NuGet API fallback)
+    runs-on: windows-2022
+    timeout-minutes: 10
+    env:
+      AUTOCAD_2025_PATH: 'C:\__autocad_sdk_not_installed__'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore and build AutoCAD plugin
+        shell: pwsh
+        run: |
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project autocad/AutoCADMCP.sln
+          dotnet build autocad/AutoCADMCP.sln -c Release --no-restore
+
+      - name: Ensure host API assemblies are not copied
+        shell: pwsh
+        run: |
+          $output = 'autocad/plugin/AutoCADMCPPlugin/bin/Release/net8.0-windows'
+          $hostAssemblies = @(
+            Get-ChildItem -LiteralPath $output -File |
+              Where-Object Name -Match '^(acmgd|acdbmgd|accoremgd)\.dll$'
+          )
+          if ($hostAssemblies.Count -ne 0) {
+            throw "AutoCAD host assemblies must remain compile-only: $($hostAssemblies.Name -join ', ')"
+          }
+
+  release-package-smoke:
+    name: Updater tests and release package smoke
+    needs: [dotnet-build, autocad-dotnet-build]
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      REVIT_2023_PATH: ''
+      REVIT_2025_PATH: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build Revit 2025 plugin
+        shell: pwsh
+        run: |
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project plugin/RevitMCPPlugin/RevitMCPPlugin.csproj `
+            -TargetFramework net8.0-windows `
+            -MinVerVersionOverride 0.0.0
+          dotnet build plugin/RevitMCPPlugin/RevitMCPPlugin.csproj `
+            -c Release -f net8.0-windows --no-restore `
+            -p:MinVerVersionOverride=0.0.0
+
+      - name: Build and test updater
+        shell: pwsh
+        run: |
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project updater/Updater.csproj `
+            -MinVerVersionOverride 0.0.0
+          dotnet build updater/Updater.csproj -c Release --no-restore `
+            -p:MinVerVersionOverride=0.0.0
+
+      - name: Run updater smoke tests
+        shell: bash
+        run: bash scripts/test-updater.sh
+
+      - name: Run updater PowerShell security tests
+        shell: pwsh
+        run: .\scripts\test-updater.ps1
+
+      - name: Publish updater
+        shell: pwsh
+        run: |
+          .\.github\scripts\restore-dotnet-with-audit.ps1 `
+            -Project updater/Updater.csproj `
+            -RuntimeIdentifier win-x64 `
+            -MinVerVersionOverride 0.0.0
+          dotnet publish updater/Updater.csproj `
+            -c Release -r win-x64 --self-contained false --no-restore `
+            -p:PublishSingleFile=true -p:MinVerVersionOverride=0.0.0 `
+            -o updater/publish
+
+      - name: Build and validate release archives
+        shell: pwsh
+        run: |
+          .\.github\scripts\package-release.ps1 -Version 0.0.0
+          .\.github\scripts\validate-release-package.ps1 `
+            -PluginZip '.artifacts/release/RevitMCPPlugin-0.0.0-Revit2025.zip' `
+            -UpdaterZip '.artifacts/release/RevitMCPUpdater-0.0.0.zip' `
+            -Checksums '.artifacts/release/SHA256SUMS.txt' `
+            -ExpectedVersion '0.0.0'
