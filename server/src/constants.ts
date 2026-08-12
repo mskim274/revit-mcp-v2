@@ -17,6 +17,12 @@ export const WS_URL = `ws://${HOST}:${PORT}`;
 
 const LOCAL_APP_DATA =
   process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+export const INSTANCE_REGISTRY_DIR = join(
+  LOCAL_APP_DATA,
+  "RevitMCP",
+  "instances"
+);
+export const INSTANCE_STALE_AFTER_MS = 30_000;
 export const AUTH_TOKEN_FILE = join(
   LOCAL_APP_DATA,
   "RevitMCP",

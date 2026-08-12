@@ -6,6 +6,10 @@ export interface CommandRequest {
   command: string;
   params: Record<string, unknown>;
   timeout_ms: number;
+  // Optional host-session guard used by multi-instance CAD integrations.
+  // Older plugins ignore unknown fields, preserving wire compatibility.
+  target_session_id?: string;
+  expected_document_fingerprint?: string;
 }
 
 export interface CommandResponse {
@@ -39,6 +43,10 @@ export type ErrorCode =
   | "REVIT_API_ERROR"
   | "CAD_API_ERROR"
   | "IDEMPOTENCY_CONFLICT"
+  | "TARGET_SESSION_MISMATCH"
+  | "TARGET_DOCUMENT_MISMATCH"
+  | "TARGET_SELECTION_REQUIRED"
+  | "SESSION_NOT_FOUND"
   | "VALIDATION_ERROR"
   | "INTERNAL_ERROR";
 

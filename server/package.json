@@ -1,7 +1,7 @@
 {
   "name": "@kimminsub/revit-mcp",
   "version": "0.1.0",
-  "description": "Model Context Protocol server for Autodesk Revit — 32 tools for query, create, modify, view, export, visualization, and scripted operations.",
+  "description": "Model Context Protocol server for Autodesk Revit — 35 tools for multi-session targeting, query, create, modify, view, export, visualization, and scripted operations.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test src/tools/__tests__/contracts.test.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build",

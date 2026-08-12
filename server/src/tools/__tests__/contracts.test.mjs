@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
+import "../../services/__tests__/session-routing.test.mjs";
 
 import { SERVER_VERSION } from "../../../dist/constants.js";
 import { registerCreateTools } from "../../../dist/tools/create.js";

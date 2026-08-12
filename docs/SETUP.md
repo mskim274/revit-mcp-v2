@@ -188,9 +188,37 @@ notepad $cfg
 2. 새 대화에서: "Call revit_ping."
 3. 프로젝트 이름 + Revit 빌드 + 요소 수 반환되면 성공
 
+### Revit 여러 개 실행
+
+업데이트된 플러그인을 설치한 뒤에는 Revit을 평소처럼 여러 개 실행해도
+됩니다. 첫 프로세스는 8181, 추가 프로세스는 8183~8199 중 빈 포트를
+자동 사용합니다. 8182는 AutoCAD MCP용으로 예약됩니다.
+
+> 자동 포트 선택을 쓰려면 Revit이 상속하는 전역/User 환경변수
+> `REVIT_MCP_PORT`가 없어야 합니다. 전역으로 `8181`이 지정되어 있으면 모든
+> Revit이 8181만 사용하려 하므로 첫 프로세스만 연결됩니다. 포트를 수동으로
+> 고정할 때만 각 Revit 실행 바로가기에 서로 다른 값을 따로 지정하세요.
+
+1. `revit_list_sessions`로 실행 중인 Revit과 활성 문서를 확인합니다.
+2. 원하는 항목의 정확한 `session_id`로 `revit_set_target`을 호출합니다.
+3. `revit_get_target` 또는 `revit_ping`으로 대상 문서를 재확인합니다.
+4. 이후 일반 조회·작성 명령을 실행합니다.
+
+선택 후 해당 Revit에서 문서 탭을 바꾸면 문서 fingerprint가 달라져 명령이
+차단됩니다. 새 활성 문서를 의도한 경우 세션 목록을 갱신하고 다시
+`revit_set_target`을 호출합니다. 세션 등록 파일은
+`%LOCALAPPDATA%\RevitMCP\instances\`에 있으며, 인증정보가 아닌 PID·포트·
+활성 문서 식별정보만 담습니다.
+
 ### 트러블슈팅
 - **WebSocket 응답 없음**: Revit에 프로젝트가 열려 있는지 확인 (플러그인은
   `DocumentOpened`/`DocumentCreated` 이벤트에서 시작)
+- **대상 세션 필요 오류**: `revit_list_sessions` 후 정확한 `session_id`로
+  `revit_set_target` 호출
+- **Revit 하나만 목록에 표시됨**: 전역/User `REVIT_MCP_PORT`가 설정되어
+  있는지 확인하고, 자동 선택을 쓸 경우 제거한 뒤 Revit을 모두 재시작
+- **문서 fingerprint 불일치**: Revit의 활성 문서 탭이 바뀌었으므로 목록을
+  새로 읽고 의도한 세션을 다시 선택
 - **HTTP 401**: 플러그인과 MCP 서버가 같은
   `%LOCALAPPDATA%\RevitMCP\auth-token` 또는 같은
   `REVIT_MCP_AUTH_TOKEN`을 사용 중인지 확인

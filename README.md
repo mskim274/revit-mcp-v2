@@ -7,28 +7,28 @@
 
 Model Context Protocol server for Autodesk Revit. It lets MCP clients such as
 Codex and Claude query, create, modify, review, and export model data in a
-running Revit session.
+one or more running Revit sessions.
 
-The current `main` branch registers **32 tools**. The latest stable release may
+This development branch registers **35 tools**. The latest stable release may
 contain fewer tools; see [Releases](https://github.com/mskim274/revit-mcp-v2/releases)
 and [CHANGELOG.md](CHANGELOG.md) for version-specific contents.
 
 ## Architecture
 
 ```text
-MCP client ──stdio──▶ MCP Server (TypeScript, Node.js)
+MCP client ──stdio──▶ MCP Server + session router (TypeScript, Node.js)
                            │
-                      WebSocket :8181
+                    WebSocket :8181, :8183…:8199
                            │
-                     Revit Plugin (C#, WPF)
+                     Revit Plugin(s) (C#, WPF)
                            │
                      Revit.Async
                            │
                      CommandSet (Revit API)
 ```
 
-- **MCP Server** validates tool inputs, handles pagination, and limits response
-  size.
+- **MCP Server** validates tool inputs, discovers Revit sessions, pins the
+  selected document, handles pagination, and limits response size.
 - **Revit Plugin** owns the loopback WebSocket endpoint, command dispatch,
   idempotency cache, and update notification.
 - **CommandSet** contains reflection-discovered Revit API commands.
@@ -54,8 +54,10 @@ Two components are required: the C# Revit add-in and the TypeScript MCP server.
    %APPDATA%\Autodesk\Revit\Addins\2025\
    ```
 
-5. Start Revit and open or create a project. The add-in listens on loopback
-   port 8181. On first start it creates a local bearer token at
+5. Start Revit and open or create a project. The first add-in listens on
+   loopback port 8181; additional normally launched Revit processes choose
+   8183 through 8199 automatically (8182 is reserved for AutoCAD). On first
+   start it creates a local bearer token at
    `%LOCALAPPDATA%\RevitMCP\auth-token`; the npm server reads it
    automatically.
 
@@ -104,10 +106,36 @@ Then point the MCP client at the absolute path to `server/dist/index.js`.
 Open a Revit project and call `revit_ping`. A successful response includes the
 Revit build and current document information.
 
-## Tool inventory (32)
+## Multiple Revit sessions
+
+Each running Revit process publishes a short-lived local discovery record under
+`%LOCALAPPDATA%\RevitMCP\instances\`. Use this sequence when two or more
+sessions are open:
+
+1. Call `revit_list_sessions`.
+2. Pass the exact returned `session_id` to `revit_set_target`.
+3. Call `revit_get_target` or `revit_ping` to confirm the pinned document.
+4. Run normal query or write tools.
+
+The target stores the active document fingerprint at selection time. If the
+active document tab changes, commands fail closed until the intended session is
+selected again. With one discovered session the router selects it
+automatically. `REVIT_MCP_PORT` remains available for an explicitly fixed port;
+an explicit port is never silently changed. For automatic multi-process port
+selection, do not define `REVIT_MCP_PORT` globally in the environment inherited
+by Revit. A global `REVIT_MCP_PORT=8181` intentionally keeps every Revit process
+on 8181, so only the first one can bind.
+
+For backward compatibility, a plugin version that predates session records can
+still use the configured legacy port. The server probes the endpoint first and
+uses this fallback only when the ping response has no new session identity; a
+new plugin with a missing registry record is blocked instead of routed blindly.
+
+## Tool inventory (35)
 
 | Category | Count | Tools |
 |---|---:|---|
+| Session | 3 | `revit_list_sessions`, `revit_set_target`, `revit_get_target` |
 | Utility | 2 | `revit_ping`, `revit_get_project_info` |
 | Query | 10 | `revit_get_levels`, `revit_get_views`, `revit_get_grids`, `revit_query_elements`, `revit_get_element_info`, `revit_get_element_geometry`, `revit_get_selected_elements`, `revit_get_types_by_category`, `revit_get_family_types`, `revit_get_all_categories` |
 | Create | 3 | `revit_create_wall`, `revit_create_floor`, `revit_create_pipe_run` |

@@ -7,7 +7,7 @@
 ```
 Claude Desktop ──stdio──▶ MCP Server (TS)
                               │
-                         WebSocket :8181
+                    WebSocket :8181, :8183…:8199
                               │
                         Revit Plugin (C#) ──Revit.Async──▶ Revit API
                               │
@@ -238,7 +238,7 @@ node scripts\test-ws.js query_elements '{"category":"Walls","summary_only":true}
 ```
 REVIT_2025_PATH=C:\Program Files\Autodesk\Revit 2025   # Revit API DLL location (local dev)
 REVIT_2023_PATH=C:\Program Files\Autodesk\Revit 2023   # For .NET 4.8 target (local dev)
-REVIT_MCP_PORT=8181                                      # WebSocket port (optional override)
+REVIT_MCP_PORT=8181                                      # Exact WebSocket port override; unset for automatic multi-Revit ports
 ```
 
 When these env vars are empty (e.g., on the GitHub runner), the csproj
@@ -321,7 +321,18 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (32 tools)
+## Tool Inventory (35 tools)
+
+### Session (3)
+- `revit_list_sessions` — Discover live local Revit processes and their active documents.
+- `revit_set_target` — Pin one exact session and its current document fingerprint.
+- `revit_get_target` — Report the selected target and any session/document drift.
+
+With multiple live sessions, select a target before normal commands. Every routed
+request carries the exact session and document fingerprint; the plugin checks both
+on Revit's main thread immediately before dispatch. Switching the active document
+requires a fresh `revit_set_target`. A normally launched first Revit uses 8181 and
+additional processes auto-bind to 8183–8199; 8182 remains reserved for AutoCAD.
 
 ### Utility (2)
 - `revit_ping` — Connection health check
