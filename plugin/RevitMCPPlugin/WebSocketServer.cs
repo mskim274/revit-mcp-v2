@@ -40,6 +40,7 @@ namespace RevitMCP.Plugin
         private readonly UIApplication _uiApp;
         private readonly CommandDispatcher _dispatcher;
         private readonly int _port;
+        private readonly string _sessionId;
         private readonly string _authToken;
         private readonly string _authTokenSource;
         private readonly object _lifecycleLock = new object();
@@ -131,13 +132,22 @@ namespace RevitMCP.Plugin
             }
         }
 
-        public RevitWebSocketServer(UIApplication uiApp, int port = 8181)
+        public RevitWebSocketServer(
+            UIApplication uiApp,
+            int port = 8181,
+            string sessionId = null)
         {
             _uiApp = uiApp ?? throw new ArgumentNullException(nameof(uiApp));
             _dispatcher = new CommandDispatcher();
             _port = port;
+            _sessionId = string.IsNullOrWhiteSpace(sessionId)
+                ? Guid.NewGuid().ToString("N")
+                : sessionId.Trim();
             (_authToken, _authTokenSource) = LoadOrCreateAuthToken();
         }
+
+        public int Port => _port;
+        public string SessionId => _sessionId;
 
         /// <summary>
         /// Starts listening. Returns false when the listener could not be started,
@@ -520,6 +530,20 @@ namespace RevitMCP.Plugin
                     "Use a positive timeout no greater than 10 minutes.");
             }
 
+            if (!TryValidateAndNormalizeTargetGuard(
+                    request,
+                    out var targetGuardError))
+            {
+                return BuildErrorResponse(
+                    request.Id,
+                    "VALIDATION_ERROR",
+                    targetGuardError,
+                    true,
+                    "Refresh the Revit session list and supply both " +
+                    "target_session_id and expected_document_fingerprint " +
+                    "from the same current session record.");
+            }
+
             if (!_dispatcher.HasCommand(request.Command))
             {
                 return BuildErrorResponse(
@@ -566,6 +590,46 @@ namespace RevitMCP.Plugin
                 {
                     var uiDocument = _uiApp.ActiveUIDocument;
                     var doc = uiDocument?.Document;
+                    var documentFingerprint =
+                        Services.SessionIdentity.ComputeDocumentFingerprint(doc);
+                    if (request.TargetSessionId != null &&
+                        !string.Equals(
+                            request.TargetSessionId,
+                            _sessionId,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Task.FromResult(BuildErrorResponse(
+                            request.Id,
+                            "TARGET_SESSION_MISMATCH",
+                            $"Request targets Revit session " +
+                            $"'{request.TargetSessionId}', but this process is " +
+                            $"session '{_sessionId}' on port {_port}.",
+                            true,
+                            "Refresh the Revit session list and retry using this " +
+                            "process's current session_id, or route the command to " +
+                            "the intended Revit process."));
+                    }
+
+                    if (request.ExpectedDocumentFingerprint != null &&
+                        !string.Equals(
+                            request.ExpectedDocumentFingerprint,
+                            documentFingerprint,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Task.FromResult(BuildErrorResponse(
+                            request.Id,
+                            "TARGET_DOCUMENT_MISMATCH",
+                            $"The active document changed before execution. " +
+                            $"Expected fingerprint " +
+                            $"'{request.ExpectedDocumentFingerprint}', " +
+                            $"but '{doc?.Title ?? "(no active document)"}' has fingerprint " +
+                            $"'{documentFingerprint}'.",
+                            true,
+                            "Refresh the Revit session list, explicitly select " +
+                            "the intended document in Revit, and retry with its " +
+                            "current document_fingerprint."));
+                    }
+
                     if (doc == null)
                     {
                         return Task.FromResult(BuildCommandErrorResponse(
@@ -659,6 +723,12 @@ namespace RevitMCP.Plugin
                             request.Id,
                             commandResult));
                     }
+
+                    EnrichSessionContext(
+                        request.Command,
+                        commandResult,
+                        doc,
+                        documentFingerprint);
 
                     try
                     {
@@ -890,6 +960,32 @@ namespace RevitMCP.Plugin
                         $"{targetView.Id.GetValue()}.");
                 }
             }
+        }
+
+        private void EnrichSessionContext(
+            string commandName,
+            CommandResult commandResult,
+            Document document,
+            string documentFingerprint)
+        {
+            if (!string.Equals(commandName, "ping", StringComparison.Ordinal) &&
+                !string.Equals(
+                    commandName,
+                    "get_project_info",
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (!(commandResult?.Data is Dictionary<string, object> data))
+                return;
+
+            data["session_id"] = _sessionId;
+            data["port"] = _port;
+            data["pid"] = System.Diagnostics.Process.GetCurrentProcess().Id;
+            data["document_fingerprint"] = documentFingerprint ?? "";
+            data["document_title"] = document?.Title ?? "";
+            data["document_path"] = document?.PathName ?? "";
         }
 
         private static bool HasCommittedMutation(object data)
@@ -1149,6 +1245,54 @@ namespace RevitMCP.Plugin
                 error =
                     $"idempotency_key exceeds " +
                     $"{MaxIdempotencyKeyLength} characters.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TryValidateAndNormalizeTargetGuard(
+            CommandRequest request,
+            out string error)
+        {
+            error = null;
+            var sessionWasSupplied = request.TargetSessionId != null;
+            var fingerprintWasSupplied =
+                request.ExpectedDocumentFingerprint != null;
+
+            if (!sessionWasSupplied && !fingerprintWasSupplied)
+                return true;
+
+            if (!sessionWasSupplied || !fingerprintWasSupplied ||
+                string.IsNullOrWhiteSpace(request.TargetSessionId) ||
+                string.IsNullOrWhiteSpace(
+                    request.ExpectedDocumentFingerprint))
+            {
+                error =
+                    "target_session_id and expected_document_fingerprint " +
+                    "must be supplied together as non-empty strings.";
+                return false;
+            }
+
+            request.TargetSessionId = request.TargetSessionId.Trim();
+            request.ExpectedDocumentFingerprint =
+                request.ExpectedDocumentFingerprint.Trim().ToLowerInvariant();
+
+            if (request.TargetSessionId.Length > 128)
+            {
+                error = "target_session_id must not exceed 128 characters.";
+                return false;
+            }
+
+            if (request.ExpectedDocumentFingerprint.Length != 64 ||
+                request.ExpectedDocumentFingerprint.Any(
+                    character =>
+                        !((character >= '0' && character <= '9') ||
+                          (character >= 'a' && character <= 'f'))))
+            {
+                error =
+                    "expected_document_fingerprint must be exactly 64 " +
+                    "hexadecimal characters.";
                 return false;
             }
 
@@ -1682,7 +1826,15 @@ namespace RevitMCP.Plugin
             public string Command { get; set; } = "";
             public Dictionary<string, object> Params { get; set; } =
                 new Dictionary<string, object>();
+
+            [JsonPropertyName("timeout_ms")]
             public int TimeoutMs { get; set; } = 30000;
+
+            [JsonPropertyName("target_session_id")]
+            public string TargetSessionId { get; set; }
+
+            [JsonPropertyName("expected_document_fingerprint")]
+            public string ExpectedDocumentFingerprint { get; set; }
         }
     }
 }

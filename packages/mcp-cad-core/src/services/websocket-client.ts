@@ -14,8 +14,7 @@ import {
 import type { CommandRequest, CommandResponse } from "../types.js";
 
 type HeaderProvider =
-  | Record<string, string>
-  | (() => Record<string, string> | undefined);
+  Record<string, string> | (() => Record<string, string> | undefined);
 
 export interface CadWebSocketClientConfig {
   url: string;
@@ -38,6 +37,10 @@ export interface CommandExecutionOptions {
   // the MCP-side timer fires. This changes the recovery guidance accordingly.
   sideEffect?: boolean;
   timeoutSuggestion?: string;
+  // Optional routing guards. They are serialized as top-level request fields
+  // so command parameters remain an honest representation of the tool input.
+  targetSessionId?: string;
+  expectedDocumentFingerprint?: string;
 }
 
 interface PendingRequest {
@@ -100,7 +103,7 @@ export class CadWebSocketClient {
         typeof this.headers === "function" ? this.headers() : this.headers;
       socket = new WebSocket(
         this.url,
-        headers && Object.keys(headers).length > 0 ? { headers } : undefined
+        headers && Object.keys(headers).length > 0 ? { headers } : undefined,
       );
       this.ws = socket;
     } catch (error) {
@@ -149,13 +152,13 @@ export class CadWebSocketClient {
           this.stopPingInterval();
           this.failPendingRequests(
             "Connection closed while a command was in progress",
-            true
+            true,
           );
         }
 
         rejectOnce(
           connectionError ??
-            new Error("WebSocket connection closed before opening")
+            new Error("WebSocket connection closed before opening"),
         );
 
         if (isCurrentSocket) {
@@ -183,7 +186,7 @@ export class CadWebSocketClient {
       },
       () => {
         if (this.connectPromise === attempt) this.connectPromise = null;
-      }
+      },
     );
     return attempt;
   }
@@ -192,17 +195,17 @@ export class CadWebSocketClient {
     command: string,
     params: Record<string, unknown> = {},
     timeoutMs: number = DEFAULT_TIMEOUT_MS,
-    options: CommandExecutionOptions = {}
+    options: CommandExecutionOptions = {},
   ): Promise<CommandResponse> {
     // The plugin processes one request at a time per WebSocket connection.
     // Serialize here as well so a queued command's timeout starts when it is
     // actually sent, not while an earlier Revit API operation is still running.
     const task = this.commandQueue.then(() =>
-      this.sendCommandNow(command, params, timeoutMs, options)
+      this.sendCommandNow(command, params, timeoutMs, options),
     );
     this.commandQueue = task.then(
       () => undefined,
-      () => undefined
+      () => undefined,
     );
     return task;
   }
@@ -225,7 +228,7 @@ export class CadWebSocketClient {
     command: string,
     params: Record<string, unknown>,
     timeoutMs: number,
-    options: CommandExecutionOptions
+    options: CommandExecutionOptions,
   ): Promise<CommandResponse> {
     const socket = this.ws;
     if (!this.isConnected || !socket || socket.readyState !== WebSocket.OPEN) {
@@ -244,10 +247,9 @@ export class CadWebSocketClient {
     const id = randomUUID();
     const hasIdempotencyKey = Object.prototype.hasOwnProperty.call(
       params,
-      "idempotency_key"
+      "idempotency_key",
     );
-    const sideEffect =
-      options.sideEffect ?? hasIdempotencyKey;
+    const sideEffect = options.sideEffect ?? hasIdempotencyKey;
     const suppliedKey = params.idempotency_key;
     let idempotencyKey: string | undefined;
     let requestParams = params;
@@ -277,6 +279,14 @@ export class CadWebSocketClient {
       command,
       params: requestParams,
       timeout_ms: timeoutMs,
+      ...(options.targetSessionId
+        ? { target_session_id: options.targetSessionId }
+        : {}),
+      ...(options.expectedDocumentFingerprint
+        ? {
+            expected_document_fingerprint: options.expectedDocumentFingerprint,
+          }
+        : {}),
     };
 
     return new Promise<CommandResponse>((resolve) => {
@@ -291,8 +301,8 @@ export class CadWebSocketClient {
             `Command '${command}' timed out after ${timeoutMs}ms`,
             true,
             options.timeoutSuggestion ??
-              "Narrow the query, reduce its limit/detail, or increase the command timeout before retrying."
-          )
+              "Narrow the query, reduce its limit/detail, or increase the command timeout before retrying.",
+          ),
         );
       }, timeoutMs);
 
@@ -317,8 +327,8 @@ export class CadWebSocketClient {
               "CONNECTION_ERROR",
               `Failed to send command: ${error.message}`,
               true,
-              this.notConnectedSuggestion
-            )
+              this.notConnectedSuggestion,
+            ),
           );
         });
       } catch (error) {
@@ -333,8 +343,8 @@ export class CadWebSocketClient {
             "CONNECTION_ERROR",
             `Failed to send command: ${sendError.message}`,
             true,
-            this.notConnectedSuggestion
-          )
+            this.notConnectedSuggestion,
+          ),
         );
       }
     });
@@ -345,14 +355,14 @@ export class CadWebSocketClient {
       const parsed: unknown = JSON.parse(data);
       if (!isCommandResponse(parsed)) {
         console.error(
-          `${this.logTag} Ignored malformed response: ${truncateForLog(data)}`
+          `${this.logTag} Ignored malformed response: ${truncateForLog(data)}`,
         );
         return;
       }
 
       if (parsed.status === "progress") {
         console.error(
-          `${this.logTag} Progress: ${parsed.progress?.message ?? "Working"} (${parsed.progress?.current ?? "?"}/${parsed.progress?.total ?? "?"})`
+          `${this.logTag} Progress: ${parsed.progress?.message ?? "Working"} (${parsed.progress?.current ?? "?"}/${parsed.progress?.total ?? "?"})`,
         );
         return;
       }
@@ -360,7 +370,7 @@ export class CadWebSocketClient {
       this.resolvePending(parsed.id, parsed);
     } catch (error) {
       console.error(
-        `${this.logTag} Failed to parse response (${toError(error).message}): ${truncateForLog(data)}`
+        `${this.logTag} Failed to parse response (${toError(error).message}): ${truncateForLog(data)}`,
       );
     }
   }
@@ -383,8 +393,8 @@ export class CadWebSocketClient {
           "CONNECTION_ERROR",
           message,
           recoverable,
-          recoverable ? this.notConnectedSuggestion : undefined
-        )
+          recoverable ? this.notConnectedSuggestion : undefined,
+        ),
       );
     }
     this.pendingRequests.clear();
@@ -396,17 +406,14 @@ export class CadWebSocketClient {
     code: "CONNECTION_ERROR" | "TIMEOUT_ERROR",
     message: string,
     recoverable: boolean,
-    querySuggestion?: string
+    querySuggestion?: string,
   ): CommandResponse {
     const error: NonNullable<CommandResponse["error"]> = {
       code,
       message,
       recoverable,
       suggestion: pending.sideEffect
-        ? sideEffectRecoverySuggestion(
-            pending.command,
-            pending.idempotencyKey
-          )
+        ? sideEffectRecoverySuggestion(pending.command, pending.idempotencyKey)
         : querySuggestion,
     };
     if (pending.sideEffect && pending.idempotencyKey) {
@@ -417,7 +424,7 @@ export class CadWebSocketClient {
 
   private attachSideEffectRecovery(
     response: CommandResponse,
-    pending: PendingRequest
+    pending: PendingRequest,
   ): CommandResponse {
     if (
       response.status !== "error" ||
@@ -441,7 +448,7 @@ export class CadWebSocketClient {
         suggestion: uncertain
           ? sideEffectRecoverySuggestion(
               pending.command,
-              pending.idempotencyKey
+              pending.idempotencyKey,
             )
           : response.error.suggestion,
       },
@@ -460,15 +467,15 @@ export class CadWebSocketClient {
     this.reconnectAttempts++;
     const exponent = Math.min(
       Math.max(this.reconnectAttempts - 1, 0),
-      WS_MAX_RECONNECT_ATTEMPTS - 1
+      WS_MAX_RECONNECT_ATTEMPTS - 1,
     );
     const delay = Math.min(
       this.reconnectIntervalMs * 2 ** exponent,
-      this.maxReconnectIntervalMs
+      this.maxReconnectIntervalMs,
     );
 
     console.error(
-      `${this.logTag} Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`
+      `${this.logTag} Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`,
     );
 
     this.reconnectTimer = setTimeout(() => {
@@ -523,7 +530,7 @@ function toError(value: unknown): Error {
 
 function sideEffectRecoverySuggestion(
   command: string,
-  idempotencyKey?: string
+  idempotencyKey?: string,
 ): string {
   const retryGuidance = idempotencyKey
     ? "If an identical retry is necessary, pass the exact value from error.idempotency_key."

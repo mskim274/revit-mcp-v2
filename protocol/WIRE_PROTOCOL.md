@@ -11,7 +11,8 @@ implementation lives in [`@kimminsub/mcp-cad-core`](../packages/mcp-cad-core/).
 ## Transport
 
 - **WebSocket** over plain HTTP, `ws://127.0.0.1:<port>/`
-- Default ports: `8181` (Revit) and `8182` (AutoCAD).
+- Default ports: `8181` (first Revit) and `8182` (AutoCAD). Additional Revit
+  processes with no explicit port override scan `8183` through `8199`.
 - Localhost-only by design. WebSocket upgrades require
   `Authorization: Bearer <token>`. The plugin creates a 256-bit token at
   `%LOCALAPPDATA%\RevitMCP\auth-token`, unless
@@ -37,7 +38,9 @@ rejected.
   "id": "uuid-v4",          // client-generated, echoed in response
   "command": "query_elements",
   "params": { "category": "Walls", "summary_only": true },
-  "timeout_ms": 30000        // hint; plugin may enforce its own ceiling
+  "timeout_ms": 30000,       // hint; plugin may enforce its own ceiling
+  "target_session_id": "...",              // optional multi-host guard
+  "expected_document_fingerprint": "..."   // optional active-document guard
 }
 ```
 
@@ -110,6 +113,23 @@ The C# side serializes these via `System.Text.Json`.
   `idempotency_key` only for an identical retry. Synthetic timeout and
   connection errors include the effective key in `error.idempotency_key`.
 
+### `target_session_id` and `expected_document_fingerprint`
+
+- Optional, backward-compatible top-level routing guards. They are not command
+  parameters and therefore do not alter the command's business payload.
+- When either is supplied to the Revit plugin, both must be supplied. The
+  session id identifies one Revit process; the SHA-256 document fingerprint
+  pins the active document that was selected by the MCP session router.
+- Revit validates both values on its main thread immediately before command
+  dispatch. A process restart, target change, active-document switch, close/
+  reopen, or Save As causes a fail-closed error before any mutation.
+- AutoCAD and older plugins may ignore these optional top-level fields under
+  the forward-compatibility rule.
+- When no Revit registry record is discoverable, the router first sends a
+  read-only legacy-port ping. It forwards the requested command only if that
+  response has no session identity (a genuine pre-session plugin); otherwise
+  it fails closed until the registry is restored.
+
 ### `data`
 - Command-specific payload on success. Always an object, never raw scalars.
 - Pagination follows the `PaginatedResult<T>` shape from `types.ts`.
@@ -129,6 +149,10 @@ The C# side serializes these via `System.Text.Json`.
 | `CAD_API_ERROR`   | AutoCAD command/API failure.                                |
 | `VALIDATION_ERROR`| Bad params. NOT retry-safe without fixing the call.         |
 | `IDEMPOTENCY_CONFLICT` | Key reused for a different request.                    |
+| `TARGET_SELECTION_REQUIRED` | Multiple live hosts exist and no target is pinned. |
+| `SESSION_NOT_FOUND` | The selected local host session is no longer discoverable. |
+| `TARGET_SESSION_MISMATCH` | Request reached a different host process than selected. |
+| `TARGET_DOCUMENT_MISMATCH` | The host's active document changed after selection. |
 | `INTERNAL_ERROR`  | Bug in plugin. Report.                                      |
 
 Product-specific codes are intentional: Revit uses `REVIT_API_ERROR`,
@@ -190,8 +214,8 @@ to avoid collisions when both servers run on one machine.
 
 ## Forward compatibility
 
-- New fields **may** be added to `params` and `data`. Receivers should
-  ignore unknown fields, not error.
+- New optional fields **may** be added to the request envelope, `params`, and
+  `data`. Receivers should ignore unknown fields, not error.
 - `error.code` is an open enum — new codes may appear. Servers should
   treat unknown codes the same as `INTERNAL_ERROR`.
 - `command` names are stable per major version. Renames require a v2.

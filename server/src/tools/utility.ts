@@ -10,7 +10,7 @@ import type { RevitWebSocketClient } from "../services/websocket-client.js";
 
 export function registerUtilityTools(
   server: McpServer,
-  wsClient: RevitWebSocketClient
+  wsClient: RevitWebSocketClient,
 ): void {
   // ─── revit_ping ───
   server.registerTool(
@@ -35,34 +35,20 @@ Returns:
       },
     },
     async () => {
-      if (!wsClient.isConnected) {
-        // Try to connect first
-        try {
-          await wsClient.connect();
-        } catch {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  connected: false,
-                  error: "Cannot connect to Revit. Ensure Revit is running with the MCP plugin.",
-                }),
-              },
-            ],
-          };
-        }
-      }
-
+      // The session router performs discovery, target selection checks, and
+      // on-demand connection itself. Calling connect() first would collapse a
+      // registry safety error into an unhelpful generic connection failure.
       const response = await wsClient.sendCommand("ping", {}, 10000);
 
       if (response.status === "error") {
         return {
+          isError: true,
           content: [
             {
               type: "text" as const,
               text: JSON.stringify({
                 connected: false,
+                code: response.error?.code,
                 error: response.error?.message ?? "Unknown error",
                 suggestion: response.error?.suggestion,
               }),
@@ -75,11 +61,14 @@ Returns:
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ connected: true, ...response.data as object }),
+            text: JSON.stringify({
+              connected: true,
+              ...(response.data as object),
+            }),
           },
         ],
       };
-    }
+    },
   );
 
   // ─── revit_get_project_info ───
@@ -105,10 +94,15 @@ Use this tool at the start of a conversation to understand what project the user
 
       if (response.status === "error") {
         return {
+          isError: true,
           content: [
             {
               type: "text" as const,
-              text: `Error: ${response.error?.message}. ${response.error?.suggestion ?? ""}`,
+              text: JSON.stringify({
+                code: response.error?.code,
+                error: response.error?.message,
+                suggestion: response.error?.suggestion,
+              }),
             },
           ],
         };
@@ -122,6 +116,6 @@ Use this tool at the start of a conversation to understand what project the user
           },
         ],
       };
-    }
+    },
   );
 }

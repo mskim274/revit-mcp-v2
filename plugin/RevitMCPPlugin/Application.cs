@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,10 +27,21 @@ namespace RevitMCP.Plugin
 
         private RevitWebSocketServer _wsServer;
         private static readonly int DefaultPort = 8181;
+        private const int AutoPortMin = 8183;
+        private const int AutoPortMax = 8199;
+        private static readonly TimeSpan RegistryRetryInterval =
+            TimeSpan.FromSeconds(10);
         private int _serverPort = DefaultPort;
+        private bool _serverPortExplicit;
         private int _serverStartPending;
         private int _shutdownRequested;
         private DateTime _nextServerRetryUtc = DateTime.MinValue;
+        private readonly string _sessionId = Guid.NewGuid().ToString("N");
+        private readonly object _registryLifecycleLock = new object();
+        private RevitInstanceRegistry _instanceRegistry;
+        private DateTime _nextRegistryRetryUtc = DateTime.MinValue;
+        private string _revitVersion = "";
+        private string _revitBuild = "";
 
         // One-shot update check state. We run the network call in OnStartup
         // (fire-and-forget) and render the dialog on the first Idling tick,
@@ -47,17 +59,42 @@ namespace RevitMCP.Plugin
                 // Initialize Revit.Async — MUST be called in OnStartup
                 RevitTask.Initialize(application);
 
-                // Read port from environment variable (allows multi-instance)
+                // Cache Revit-owned values while OnStartup is on Revit's UI
+                // thread.  Registry retries use only these plain strings and
+                // never touch ControlledApplication from another thread.
+                _revitVersion =
+                    application.ControlledApplication.VersionNumber ?? "";
+                try
+                {
+                    _revitBuild =
+                        application.ControlledApplication.VersionBuild ?? "";
+                }
+                catch
+                {
+                    _revitBuild = "";
+                }
+
+                // An explicitly configured port is a stable operator contract:
+                // never silently route that process to another port.  With no
+                // override, scan a bounded range so several Revit processes can
+                // coexist.  8182 is reserved for the AutoCAD MCP bridge.
                 var port = DefaultPort;
                 var portEnv = Environment.GetEnvironmentVariable("REVIT_MCP_PORT");
-                if (!string.IsNullOrEmpty(portEnv) &&
-                    int.TryParse(portEnv, out var parsed) &&
-                    parsed >= 1 &&
-                    parsed <= 65535)
+                _serverPortExplicit = !string.IsNullOrWhiteSpace(portEnv);
+                if (_serverPortExplicit)
                 {
+                    if (!int.TryParse(portEnv, out var parsed) ||
+                        parsed < 1 ||
+                        parsed > 65535)
+                    {
+                        throw new InvalidOperationException(
+                            "REVIT_MCP_PORT must be an integer from 1 through 65535.");
+                    }
                     port = parsed;
                 }
                 _serverPort = port;
+
+                TryInitializeInstanceRegistry();
 
                 // Start WebSocket server when ANY document becomes active.
                 // DocumentOpened fires for existing .rvt files.
@@ -68,6 +105,7 @@ namespace RevitMCP.Plugin
                 application.ControlledApplication.DocumentCreated += OnDocumentCreated;
                 application.ControlledApplication.DocumentClosing += OnDocumentClosing;
                 application.Idling += OnIdlingEnsureServer;
+                application.Idling += OnIdlingUpdateRegistrySnapshot;
 
                 // Harness Engineering — Tier 1: self-update check.
                 // Runs in a background task; completion is polled from the
@@ -80,8 +118,7 @@ namespace RevitMCP.Plugin
                         UpdateRepoOwner,
                         UpdateRepoName,
                         GetCurrentPluginVersion(),
-                        NormalizeRevitYear(
-                            application.ControlledApplication.VersionNumber));
+                        NormalizeRevitYear(_revitVersion));
                     _updateCheckTask = _updateChecker.CheckAsync();
                     application.Idling += OnIdlingShowUpdateDialog;
                 }
@@ -91,8 +128,13 @@ namespace RevitMCP.Plugin
                         $"[RevitMCP.Update] Failed to schedule update check: {ex.Message}");
                 }
 
+                var portDescription = _serverPortExplicit
+                    ? port.ToString()
+                    : $"{DefaultPort}, with automatic fallback to " +
+                      $"{AutoPortMin}-{AutoPortMax}";
                 System.Diagnostics.Debug.WriteLine(
-                    $"[RevitMCP] Plugin loaded. WebSocket will start on port {port} when a document opens.");
+                    $"[RevitMCP] Plugin loaded. WebSocket will start on port " +
+                    $"{portDescription} when a document opens.");
 
                 return Result.Succeeded;
             }
@@ -109,11 +151,27 @@ namespace RevitMCP.Plugin
             Interlocked.Exchange(ref _shutdownRequested, 1);
             _wsServer?.Stop();
             _wsServer = null;
+            RevitInstanceRegistry registryToDispose;
+            lock (_registryLifecycleLock)
+            {
+                registryToDispose = _instanceRegistry;
+                _instanceRegistry = null;
+            }
+            try
+            {
+                registryToDispose?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[RevitMCP] Instance registry shutdown failed: {ex.Message}");
+            }
             _updateChecker?.Dispose();
             application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
             application.ControlledApplication.DocumentCreated -= OnDocumentCreated;
             application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
             application.Idling -= OnIdlingEnsureServer;
+            application.Idling -= OnIdlingUpdateRegistrySnapshot;
             application.Idling -= OnIdlingShowUpdateDialog;
 
             System.Diagnostics.Debug.WriteLine("[RevitMCP] Plugin shut down.");
@@ -149,16 +207,25 @@ namespace RevitMCP.Plugin
                     if (Volatile.Read(ref _shutdownRequested) != 0) return;
                     if (_wsServer != null) return;
 
-                    var candidate = new RevitWebSocketServer(uiApp, _serverPort);
-                    if (candidate.Start())
+                    foreach (var candidatePort in GetCandidatePorts())
                     {
-                        _wsServer = candidate;
-                    }
-                    else
-                    {
+                        var candidate = new RevitWebSocketServer(
+                            uiApp,
+                            candidatePort,
+                            _sessionId);
+                        if (candidate.Start())
+                        {
+                            _wsServer = candidate;
+                            _serverPort = candidatePort;
+                            TryInitializeInstanceRegistry();
+                            TryUpdateRegistrySnapshot(uiApp);
+                            return;
+                        }
+
                         candidate.Stop();
-                        _nextServerRetryUtc = DateTime.UtcNow.AddSeconds(2);
                     }
+
+                    _nextServerRetryUtc = DateTime.UtcNow.AddSeconds(2);
                 });
 
                 _ = startTask.ContinueWith(
@@ -215,6 +282,103 @@ namespace RevitMCP.Plugin
         {
             // Only stop if this is the last document
             // (Revit may have multiple documents open)
+        }
+
+        private IEnumerable<int> GetCandidatePorts()
+        {
+            if (_serverPortExplicit)
+            {
+                yield return _serverPort;
+                yield break;
+            }
+
+            yield return DefaultPort;
+            for (var port = AutoPortMin; port <= AutoPortMax; port++)
+                yield return port;
+        }
+
+        private void OnIdlingUpdateRegistrySnapshot(object sender, IdlingEventArgs e)
+        {
+            if (!(sender is UIApplication uiApplication))
+                return;
+
+            if (Volatile.Read(ref _shutdownRequested) != 0)
+            {
+                uiApplication.Idling -= OnIdlingUpdateRegistrySnapshot;
+                return;
+            }
+
+            if (_wsServer != null)
+            {
+                TryInitializeInstanceRegistry();
+                TryUpdateRegistrySnapshot(uiApplication);
+            }
+        }
+
+        /// <summary>
+        /// Best-effort registry construction with bounded retry.  This method
+        /// uses cached strings and filesystem APIs only; it never reads Revit
+        /// API state.  Calls currently originate on Revit's UI thread, while
+        /// the lock also protects against shutdown/lifecycle races.
+        /// </summary>
+        private bool TryInitializeInstanceRegistry()
+        {
+            lock (_registryLifecycleLock)
+            {
+                if (Volatile.Read(ref _shutdownRequested) != 0)
+                    return false;
+
+                if (_instanceRegistry != null)
+                    return true;
+
+                var now = DateTime.UtcNow;
+                if (now < _nextRegistryRetryUtc)
+                    return false;
+
+                try
+                {
+                    _instanceRegistry = new RevitInstanceRegistry(
+                        _sessionId,
+                        _revitVersion,
+                        _revitBuild);
+                    _nextRegistryRetryUtc = DateTime.MaxValue;
+                    System.Diagnostics.Debug.WriteLine(
+                        "[RevitMCP] Instance registry initialized.");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _instanceRegistry = null;
+                    _nextRegistryRetryUtc =
+                        now.Add(RegistryRetryInterval);
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[RevitMCP] Instance registry initialization failed; " +
+                        $"retrying after {RegistryRetryInterval.TotalSeconds:0}s: " +
+                        $"{ex.Message}");
+                    return false;
+                }
+            }
+        }
+
+        private void TryUpdateRegistrySnapshot(UIApplication uiApplication)
+        {
+            try
+            {
+                // Revit API reads remain on this UI-thread event.  The registry
+                // service copies only strings/scalars, then its timer performs
+                // the 2-second heartbeat file writes off the UI thread.
+                RevitInstanceRegistry registry;
+                lock (_registryLifecycleLock)
+                    registry = _instanceRegistry;
+                registry?.UpdateSnapshot(uiApplication, _serverPort);
+            }
+            catch (Exception ex)
+            {
+                // Discovery failure must not break Revit or command execution.
+                // Keep retrying on later idle ticks so transient API reads recover.
+                System.Diagnostics.Debug.WriteLine(
+                    $"[RevitMCP] Instance snapshot update failed: {ex.Message}");
+            }
         }
 
         /// <summary>

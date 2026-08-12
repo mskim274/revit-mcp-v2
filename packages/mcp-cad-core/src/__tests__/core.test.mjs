@@ -2,13 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
-import {
-  access,
-  mkdir,
-  rm,
-  utimes,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -123,8 +117,42 @@ test("commands are sequential and each timeout starts when the command is sent",
   assert.equal(maxActive, 1);
   assert.ok(
     Date.now() - started >= 330,
-    "the second command should be sent only after the first response"
+    "the second command should be sent only after the first response",
   );
+});
+
+test("session routing guards are top-level wire fields, not command params", async (t) => {
+  let received;
+  const { server, url } = await startServer((socket) => {
+    socket.on("message", (data) => {
+      received = JSON.parse(data.toString());
+      socket.send(responseFor(received));
+    });
+  });
+  t.after(() => stopServer(server));
+
+  const client = new CadWebSocketClient({
+    url,
+    logPrefix: "core-test",
+    pingIntervalMs: 60_000,
+  });
+  t.after(() => client.disconnect());
+  await client.connect();
+
+  const response = await client.sendCommand(
+    "query",
+    { category: "Walls" },
+    1000,
+    {
+      targetSessionId: "session-123",
+      expectedDocumentFingerprint: "document-456",
+    },
+  );
+
+  assert.equal(response.status, "success");
+  assert.equal(received.target_session_id, "session-123");
+  assert.equal(received.expected_document_fingerprint, "document-456");
+  assert.deepEqual(received.params, { category: "Walls" });
 });
 
 test("socket closure resolves an in-flight command immediately", async (t) => {
@@ -196,12 +224,9 @@ test("side-effect timeout explains the unknown outcome and exact-key retry", asy
   t.after(() => client.disconnect());
   await client.connect();
 
-  const response = await client.sendCommand(
-    "create_item",
-    {},
-    25,
-    { sideEffect: true }
-  );
+  const response = await client.sendCommand("create_item", {}, 25, {
+    sideEffect: true,
+  });
   assert.equal(response.status, "error");
   assert.equal(response.error?.code, "TIMEOUT_ERROR");
   assert.match(receivedKey, /^[0-9a-f-]{36}$/);
@@ -232,7 +257,7 @@ test("a dropped side-effect connection preserves its generated retry key", async
   const response = await client.sendCommand(
     "create_item",
     { idempotency_key: undefined },
-    5000
+    5000,
   );
   assert.equal(response.status, "error");
   assert.equal(response.error?.code, "CONNECTION_ERROR");
@@ -259,10 +284,7 @@ test("response formatter emits MCP errors and handles missing success data", asy
       };
     },
   };
-  const errorResult = await formatter.sendAndFormat(
-    errorClient,
-    "bad_command"
-  );
+  const errorResult = await formatter.sendAndFormat(errorClient, "bad_command");
   assert.equal(errorResult.isError, true);
   assert.deepEqual(errorResult.structuredContent, {
     error: {
@@ -281,7 +303,7 @@ test("response formatter emits MCP errors and handles missing success data", asy
   };
   const emptyResult = await formatter.sendAndFormat(
     emptyClient,
-    "empty_command"
+    "empty_command",
   );
   assert.equal(emptyResult.content[0].text, "null");
 });
@@ -304,7 +326,7 @@ test("overflow preview is UTF-8 safe and old spill files are removed", async (t)
   });
   const result = await formatter.protectAgainstOverflow(
     "가".repeat(30),
-    "unicode"
+    "unicode",
   );
 
   assert.doesNotMatch(result.content[0].text, /\uFFFD/);
@@ -322,7 +344,7 @@ test("overflow spill failure still returns a bounded warning", async () => {
   });
   const result = await formatter.protectAgainstOverflow(
     "x".repeat(100),
-    "spill_failure"
+    "spill_failure",
   );
 
   assert.equal(result.isError, undefined);
@@ -338,7 +360,7 @@ test("pagination accepts documented cursors and rejects malformed input", () => 
   assert.throws(() => parseCursor("not-a-cursor"), CursorValidationError);
   assert.throws(
     () => parseCursor(Buffer.from("offset:-1").toString("base64")),
-    CursorValidationError
+    CursorValidationError,
   );
   assert.throws(() => createCursor(-1), RangeError);
 });

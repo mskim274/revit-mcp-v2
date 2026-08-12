@@ -9,7 +9,14 @@ changes are still fair game.
 ## [Unreleased]
 
 ### Added
-- Expanded the Revit MCP surface to 32 tools, including exact-match and
+- Added multi-Revit session discovery and targeting: normally launched Revit
+  processes auto-bind to 8181 or 8183–8199, publish short-lived local registry
+  records, and can be selected with `revit_list_sessions`,
+  `revit_set_target`, and `revit_get_target`.
+- Added process/session and active-document fingerprint guards to the
+  WebSocket request envelope so a selected target fails closed if the Revit
+  process or active document changes before execution.
+- Expanded the Revit MCP surface to 35 tools, including session targeting, exact-match and
   batch-query improvements, batch parameter modification, type management,
   schedule export, review overlays and tagging, survey-coordinate pipe runs,
   live C# script execution, and batch view duplication.

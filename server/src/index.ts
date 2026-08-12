@@ -22,6 +22,7 @@ import { registerViewTools } from "./tools/view.js";
 import { registerExportTools } from "./tools/export.js";
 import { registerVisualizeTools } from "./tools/visualize.js";
 import { registerScriptTools } from "./tools/script.js";
+import { registerSessionTools } from "./tools/sessions.js";
 
 async function main(): Promise<void> {
   // Initialize MCP Server
@@ -34,6 +35,7 @@ async function main(): Promise<void> {
   const wsClient = new RevitWebSocketClient();
 
   // Register all tools
+  registerSessionTools(server, wsClient);
   registerUtilityTools(server, wsClient);
   registerQueryTools(server, wsClient);
   registerCreateTools(server, wsClient);

@@ -28,9 +28,13 @@ coordinate validation, remediation, and disclosure through the advisory.
 Revit MCP is a local automation bridge with powerful write access:
 
 - The MCP server and CAD plugin are intended to communicate over loopback
-  only. Do not expose ports 8181 or 8182 to a LAN or the internet. WebSocket
+  only. Do not expose ports 8181–8199 to a LAN or the internet. WebSocket
   upgrades require a bearer token generated under
   `%LOCALAPPDATA%\RevitMCP\auth-token`; protect it like a local credential.
+- Multi-Revit discovery records under `%LOCALAPPDATA%\RevitMCP\instances\`
+  contain local process, port, and active-document path metadata but no bearer
+  token. Protect the directory as potentially sensitive project metadata; the
+  MCP server rejects stale, malformed, oversized, or linked registry entries.
 - Create, modify, delete, view, and script tools act with the permissions of
   the current Revit or AutoCAD user. Keep recoverable model backups and review
   requested mutations before approval.
