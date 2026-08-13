@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net48;net8.0-windows</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <RootNamespace>RevitMCP.CommandSet.Interfaces</RootNamespace>
+    <AssemblyName>RevitMCP.Contracts</AssemblyName>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" Version="5.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48' AND '$(REVIT_2023_PATH)' != ''">
+    <Reference Include="RevitAPI">
+      <HintPath>$(REVIT_2023_PATH)\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48' AND '$(REVIT_2023_PATH)' == ''">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2023.1.90" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' != ''">
+    <Reference Include="RevitAPI">
+      <HintPath>$(REVIT_2025_PATH)\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows' AND '$(REVIT_2025_PATH)' == ''">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2025.4.50" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

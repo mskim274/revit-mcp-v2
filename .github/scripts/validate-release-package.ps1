@@ -261,7 +261,9 @@ Test-ReleaseArchive `
     -ExpectedProduct 'revit-plugin-2025' `
     -RequiredNames @(
         'RevitMCPPlugin.dll',
+        'RevitMCP.Contracts.dll',
         'RevitMCP.CommandSet.dll',
+        'RevitMCP.CommandSet.deps.json',
         'Revit.Async.dll',
         'RevitMCPPlugin.deps.json',
         'Microsoft.CodeAnalysis.dll',
@@ -281,6 +283,7 @@ Test-ReleaseArchive `
     ) `
     -VersionedBinaryNames @(
         'RevitMCPPlugin.dll',
+        'RevitMCP.Contracts.dll',
         'RevitMCP.CommandSet.dll'
     )
 

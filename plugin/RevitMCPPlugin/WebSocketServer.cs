@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.WebSockets;
-using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -38,7 +37,7 @@ namespace RevitMCP.Plugin
             CreateCommandDataJsonOptions();
 
         private readonly UIApplication _uiApp;
-        private readonly CommandDispatcher _dispatcher;
+        private CommandDispatcher _dispatcher;
         private readonly int _port;
         private readonly string _sessionId;
         private readonly string _authToken;
@@ -138,7 +137,6 @@ namespace RevitMCP.Plugin
             string sessionId = null)
         {
             _uiApp = uiApp ?? throw new ArgumentNullException(nameof(uiApp));
-            _dispatcher = new CommandDispatcher();
             _port = port;
             _sessionId = string.IsNullOrWhiteSpace(sessionId)
                 ? Guid.NewGuid().ToString("N")
@@ -167,6 +165,9 @@ namespace RevitMCP.Plugin
                 try
                 {
                     listener.Start();
+                    var dispatcher = new CommandDispatcher(
+                        _uiApp.Application.VersionNumber);
+                    _dispatcher = dispatcher;
                     _cts = cts;
                     _httpListener = listener;
                     _started = true;
@@ -179,6 +180,8 @@ namespace RevitMCP.Plugin
                 }
                 catch (Exception ex)
                 {
+                    try { _dispatcher?.Dispose(); } catch { }
+                    _dispatcher = null;
                     try { listener.Close(); } catch { }
                     cts.Dispose();
                     _cts = null;
@@ -203,10 +206,11 @@ namespace RevitMCP.Plugin
             CancellationTokenSource cts;
             HttpListener listener;
             Task listenTask;
+            CommandDispatcher dispatcher;
 
             lock (_lifecycleLock)
             {
-                if (!_started && _cts == null)
+                if (!_started && _cts == null && _dispatcher == null)
                     return;
 
                 _started = false;
@@ -216,6 +220,8 @@ namespace RevitMCP.Plugin
                 _cts = null;
                 _httpListener = null;
                 _listenTask = null;
+                dispatcher = _dispatcher;
+                _dispatcher = null;
             }
 
             try { cts?.Cancel(); } catch { }
@@ -240,20 +246,22 @@ namespace RevitMCP.Plugin
             if (listenTask != null)
                 pending.Add(listenTask);
 
-            if (cts != null)
+            Action cleanup = () =>
             {
-                if (pending.Count == 0)
-                {
-                    cts.Dispose();
-                }
-                else
-                {
-                    _ = Task.WhenAll(pending).ContinueWith(
-                        _ => cts.Dispose(),
-                        CancellationToken.None,
-                        TaskContinuationOptions.ExecuteSynchronously,
-                        TaskScheduler.Default);
-                }
+                try { cts?.Dispose(); } catch { }
+                try { dispatcher?.Dispose(); } catch { }
+            };
+            if (pending.Count == 0)
+            {
+                cleanup();
+            }
+            else
+            {
+                _ = Task.WhenAll(pending).ContinueWith(
+                    _ => cleanup(),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
             }
 
             System.Diagnostics.Debug.WriteLine("[RevitMCP] WebSocket server stopped");
@@ -466,6 +474,17 @@ namespace RevitMCP.Plugin
             string message,
             CancellationToken serverToken)
         {
+            var dispatcher = _dispatcher;
+            if (dispatcher == null)
+            {
+                return BuildErrorResponse(
+                    "",
+                    "SERVER_SHUTDOWN",
+                    "The Revit MCP command dispatcher is not available.",
+                    true,
+                    "Wait for the plugin to finish starting, or reconnect after Revit restarts.");
+            }
+
             CommandRequest request;
             try
             {
@@ -544,14 +563,14 @@ namespace RevitMCP.Plugin
                     "from the same current session record.");
             }
 
-            if (!_dispatcher.HasCommand(request.Command))
+            if (!dispatcher.HasCommand(request.Command))
             {
                 return BuildErrorResponse(
                     request.Id,
                     "VALIDATION_ERROR",
                     $"Unknown command: '{request.Command}'",
                     true,
-                    $"Available commands: {string.Join(", ", _dispatcher.GetCommandNames())}");
+                    $"Available commands: {string.Join(", ", dispatcher.GetCommandNames())}");
             }
 
             var sideEffect = IsSideEffectRequest(request);
@@ -668,7 +687,7 @@ namespace RevitMCP.Plugin
                         }
                     }
 
-                    var command = _dispatcher.GetCommand(request.Command);
+                    var command = dispatcher.GetCommand(request.Command);
                     var nativeParams = ConvertJsonElements(request.Params);
 
                     try
@@ -799,7 +818,7 @@ namespace RevitMCP.Plugin
                     "INTERNAL_ERROR",
                     ex.Message,
                     false,
-                    _dispatcher.GetSuggestion(request.Command, ex));
+                    dispatcher.GetSuggestion(request.Command, ex));
             }
             finally
             {
@@ -1316,6 +1335,14 @@ namespace RevitMCP.Plugin
                 return true;
             }
 
+            if (string.Equals(
+                    command,
+                    "reload_commandset",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
             return command.StartsWith("create_", StringComparison.Ordinal)
                 || command.StartsWith("modify_", StringComparison.Ordinal)
                 || command.StartsWith("delete_", StringComparison.Ordinal)
@@ -1343,12 +1370,7 @@ namespace RevitMCP.Plugin
 
         private static string ComputeDocumentScope(Document doc)
         {
-            var identity = string.Join(
-                "\n",
-                doc.Title ?? "",
-                doc.PathName ?? "",
-                RuntimeHelpers.GetHashCode(doc).ToString());
-            return HashText(identity);
+            return Services.SessionIdentity.ComputeDocumentFingerprint(doc);
         }
 
         private static string ComputeCanonicalParametersHash(

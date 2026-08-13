@@ -9,6 +9,11 @@ changes are still fair game.
 ## [Unreleased]
 
 ### Added
+- Added Revit 2025+ CommandSet hot reload with a stable contracts assembly,
+  collectible `AssemblyLoadContext`, immutable hash-verified generations,
+  atomic pre-validated swaps, persisted activation with baseline fallback,
+  unload-leak limits, and `revit_get_commandset_status` /
+  `revit_reload_commandset` tools.
 - Added multi-Revit session discovery and targeting: normally launched Revit
   processes auto-bind to 8181 or 8183–8199, publish short-lived local registry
   records, and can be selected with `revit_list_sessions`,
@@ -16,7 +21,7 @@ changes are still fair game.
 - Added process/session and active-document fingerprint guards to the
   WebSocket request envelope so a selected target fails closed if the Revit
   process or active document changes before execution.
-- Expanded the Revit MCP surface to 35 tools, including session targeting, exact-match and
+- Expanded the Revit MCP surface to 37 tools, including session targeting, exact-match and
   batch-query improvements, batch parameter modification, type management,
   schedule export, review overlays and tagging, survey-coordinate pipe runs,
   live C# script execution, and batch view duplication.
@@ -35,6 +40,10 @@ changes are still fair game.
   and issue and pull request templates.
 
 ### Changed
+- Split the long-lived Revit host/contracts from ordinary CommandSet code.
+  CommandSet-only changes can now be staged with
+  `scripts/stage-commandset.ps1` and activated without restarting Revit 2025+;
+  host and contract changes still require restarting the affected process.
 - npm publishing now builds and publishes `@kimminsub/mcp-cad-core` before
   `@kimminsub/revit-mcp`; the server depends on the exact matching core
   version.
@@ -60,6 +69,12 @@ changes are still fair game.
 - Tool schemas now enforce cross-field contracts, bounded batch sizes,
   64-bit-safe element identifiers, strict cursors, and stable
   `idempotency_key` forwarding.
+
+### Fixed
+- Stabilized multi-Revit active-document fingerprints by using Revit's
+  document-instance hash instead of the transient managed-wrapper hash. This
+  keeps one open document pinned across API wrapper refreshes while still
+  invalidating the target when the file is closed and reopened.
 
 ### Security
 - Updated production JavaScript dependencies and added an audit gate.

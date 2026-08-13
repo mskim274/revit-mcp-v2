@@ -1,6 +1,6 @@
 using System;
+using System.Globalization;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using Autodesk.Revit.DB;
@@ -39,14 +39,17 @@ namespace RevitMCP.Plugin.Services
             var title = Safe(() => document.Title).Trim();
             var projectUniqueId = Safe(() => document.ProjectInformation?.UniqueId);
 
-            // Include runtime identity even for saved documents.  Reopening the
-            // same path produces a fresh Document object and must invalidate a
-            // previously pinned request rather than silently retargeting it.
-            var runtimeIdentity = RuntimeHelpers.GetHashCode(document).ToString();
+            // Revit overrides Document.GetHashCode() specifically for this
+            // lifetime identity: wrappers for the same currently open native
+            // document return the same value, while reopening the same file
+            // produces a new value.  The CLR object-identity hash must not be
+            // used here because it hashes the transient managed wrapper.
+            var runtimeIdentity = document.GetHashCode()
+                .ToString(CultureInfo.InvariantCulture);
 
             return Sha256Hex(string.Join(
                 "\n",
-                "revit-document-v1",
+                "revit-document-v2",
                 path,
                 title,
                 projectUniqueId,

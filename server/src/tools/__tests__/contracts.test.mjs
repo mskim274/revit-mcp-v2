@@ -9,6 +9,7 @@ import { registerCreateTools } from "../../../dist/tools/create.js";
 import { registerExportTools } from "../../../dist/tools/export.js";
 import { registerModifyTools } from "../../../dist/tools/modify.js";
 import { registerQueryTools } from "../../../dist/tools/query.js";
+import { registerUtilityTools } from "../../../dist/tools/utility.js";
 import { registerViewTools } from "../../../dist/tools/view.js";
 import { registerVisualizeTools } from "../../../dist/tools/visualize.js";
 
@@ -33,6 +34,7 @@ const tools = collectTools(
   registerExportTools,
   registerModifyTools,
   registerQueryTools,
+  registerUtilityTools,
   registerViewTools,
   registerVisualizeTools
 );
@@ -42,6 +44,118 @@ test("advertised Revit MCP version matches package metadata", () => {
     readFileSync(new URL("../../../package.json", import.meta.url), "utf8")
   );
   assert.equal(SERVER_VERSION, packageJson.version);
+});
+
+test("document fingerprint uses Revit's stable open-document identity", () => {
+  const source = readFileSync(
+    new URL(
+      "../../../../plugin/RevitMCPPlugin/Services/SessionIdentity.cs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+
+  assert.match(source, /document\.GetHashCode\(\)/);
+  assert.match(source, /revit-document-v2/);
+  assert.doesNotMatch(source, /RuntimeHelpers\.GetHashCode/);
+});
+
+test("ping exposes a live CommandSet hot-reload readiness marker", () => {
+  const source = readFileSync(
+    new URL(
+      "../../../../commandset/Commands/Utility/PingCommand.cs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
+  assert.match(source, /\["commandset_hot_reload_ready"\]\s*=\s*true/);
+});
+
+test("CommandSet hot reload tools fail closed and expose retry safety", async () => {
+  const reload = tools.get("revit_reload_commandset");
+  assert.ok(reload);
+
+  for (const generation of ["", "../escape", "bad generation", "a".repeat(129)]) {
+    assert.equal(
+      parseInput(reload, { generation }).success,
+      false,
+      `expected invalid generation ${JSON.stringify(generation)}`,
+    );
+  }
+
+  const parsed = parseInput(reload, {
+    generation: "20260813T120000Z-deadbeef",
+    idempotency_key: "reload-20260813",
+  });
+  assert.equal(parsed.success, true);
+  assert.equal(parsed.data.allow_command_removal, false);
+  assert.equal(parsed.data.persist, true);
+  const result = await reload.handler(parsed.data);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.command, "reload_commandset");
+  assert.equal(payload.params.generation, "20260813T120000Z-deadbeef");
+  assert.equal(payload.params.idempotency_key, "reload-20260813");
+
+  assert.ok(tools.has("revit_get_commandset_status"));
+});
+
+test("hot reload keeps host contracts separate from the CommandSet", () => {
+  const pluginProject = readFileSync(
+    new URL(
+      "../../../../plugin/RevitMCPPlugin/RevitMCPPlugin.csproj",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const commandSetProject = readFileSync(
+    new URL("../../../../commandset/CommandSet.csproj", import.meta.url),
+    "utf8",
+  );
+  const dispatcher = readFileSync(
+    new URL(
+      "../../../../plugin/RevitMCPPlugin/CommandDispatcher.cs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const loadContext = readFileSync(
+    new URL(
+      "../../../../plugin/RevitMCPPlugin/Services/CommandSetLoadContext.cs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const runtime = readFileSync(
+    new URL(
+      "../../../../plugin/RevitMCPPlugin/Services/CommandSetRuntime.cs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const sideBySideDeploy = readFileSync(
+    new URL(
+      "../../../../scripts/deploy-host-side-by-side.ps1",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
+  assert.match(pluginProject, /RevitMCP\.Contracts\.csproj/);
+  assert.match(commandSetProject, /RevitMCP\.Contracts\.csproj/);
+  assert.match(commandSetProject, /EnableDynamicLoading/);
+  assert.match(dispatcher, /ReloadCommandSetCommand/);
+  assert.match(loadContext, /isCollectible:\s*true/);
+  assert.match(loadContext, /typeof\(IRevitCommand\)\.Assembly/);
+  assert.match(
+    loadContext,
+    /FileShare\.ReadWrite\s*\|\s*FileShare\.Delete/,
+  );
+  assert.match(runtime, /GC\.WaitForPendingFinalizers\(\)/);
+  assert.match(runtime, /pending\s*>=\s*MaxPendingRetiredContexts/);
+  assert.match(sideBySideDeploy, /RevitMCP\\hosts/);
+  assert.match(sideBySideDeploy, /\[IO\.File\]::Replace/);
+  assert.match(sideBySideDeploy, /revit-mcp\.addin\.previous\.\{0\}\.\{1\}/);
 });
 
 function schema(name) {

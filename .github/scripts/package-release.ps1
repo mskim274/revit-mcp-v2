@@ -138,6 +138,7 @@ $expectedVersion = [Version]::Parse($Version)
 $pluginOutput = Join-Path $repoRoot "plugin\RevitMCPPlugin\bin\$Configuration\net8.0-windows"
 $pluginAssembly = Join-Path $pluginOutput 'RevitMCPPlugin.dll'
 $commandSetAssembly = Join-Path $pluginOutput 'RevitMCP.CommandSet.dll'
+$contractsAssembly = Join-Path $pluginOutput 'RevitMCP.Contracts.dll'
 Assert-BinaryFileVersion `
     -Path $pluginAssembly `
     -DisplayName 'Plugin assembly' `
@@ -146,11 +147,18 @@ Assert-BinaryFileVersion `
     -Path $commandSetAssembly `
     -DisplayName 'CommandSet assembly' `
     -ExpectedVersion $expectedVersion
+Assert-BinaryFileVersion `
+    -Path $contractsAssembly `
+    -DisplayName 'Contracts assembly' `
+    -ExpectedVersion $expectedVersion
 
 $pluginFiles = @(
     Get-ChildItem -LiteralPath $pluginOutput -File |
         Where-Object {
-            ($_.Extension -eq '.dll' -or $_.Name -eq 'RevitMCPPlugin.deps.json') -and
+            ($_.Extension -eq '.dll' -or $_.Name -in @(
+                'RevitMCPPlugin.deps.json',
+                'RevitMCP.CommandSet.deps.json'
+            )) -and
             $_.Name -notmatch '^RevitAPI(UI)?\.dll$'
         } |
         ForEach-Object {
@@ -165,7 +173,9 @@ $pluginFiles += $legalFiles
 
 $pluginRequired = @(
     'RevitMCPPlugin.dll',
+    'RevitMCP.Contracts.dll',
     'RevitMCP.CommandSet.dll',
+    'RevitMCP.CommandSet.deps.json',
     'Revit.Async.dll',
     'RevitMCPPlugin.deps.json',
     'Microsoft.CodeAnalysis.dll',

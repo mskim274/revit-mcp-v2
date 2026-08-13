@@ -76,7 +76,21 @@
 
   <!-- Project Reference -->
   <ItemGroup>
+    <ProjectReference Include="..\..\contracts\RevitMCP.Contracts.csproj" />
     <ProjectReference Include="..\..\commandset\CommandSet.csproj" />
   </ItemGroup>
+
+  <!-- The CommandSet is a runtime plugin on Revit 2025+. Keep its dependency
+       manifest next to the baseline DLL so AssemblyDependencyResolver can
+       resolve Roslyn and future private dependencies. -->
+  <Target Name="CopyCommandSetRuntimeManifest" AfterTargets="Build">
+    <ItemGroup>
+      <CommandSetRuntimeManifest Include="$(MSBuildProjectDirectory)\..\..\commandset\bin\$(Configuration)\$(TargetFramework)\RevitMCP.CommandSet.deps.json"
+                                 Condition="Exists('$(MSBuildProjectDirectory)\..\..\commandset\bin\$(Configuration)\$(TargetFramework)\RevitMCP.CommandSet.deps.json')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CommandSetRuntimeManifest)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>
