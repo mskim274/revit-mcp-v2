@@ -12,6 +12,12 @@
     <MinVerTagPrefix>v</MinVerTagPrefix>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <!-- Required for AssemblyDependencyResolver-based hot reload. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
   <!-- MinVer: derive AssemblyVersion/FileVersion from the nearest git tag
        (e.g., v0.2.0 → 0.2.0.0). Required for the auto-update check to
        compare the running plugin against GitHub Releases. -->
@@ -67,6 +73,10 @@
        see ExecuteScriptCommand.cs #if NETFRAMEWORK branch. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.9.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\contracts\RevitMCP.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

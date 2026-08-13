@@ -9,7 +9,7 @@ Model Context Protocol server for Autodesk Revit. It lets MCP clients such as
 Codex and Claude query, create, modify, review, and export model data in a
 one or more running Revit sessions.
 
-This development branch registers **35 tools**. The latest stable release may
+This development branch registers **37 tools**. The latest stable release may
 contain fewer tools; see [Releases](https://github.com/mskim274/revit-mcp-v2/releases)
 and [CHANGELOG.md](CHANGELOG.md) for version-specific contents.
 
@@ -29,9 +29,11 @@ MCP client ──stdio──▶ MCP Server + session router (TypeScript, Node.js
 
 - **MCP Server** validates tool inputs, discovers Revit sessions, pins the
   selected document, handles pagination, and limits response size.
-- **Revit Plugin** owns the loopback WebSocket endpoint, command dispatch,
+- **Revit Host Plugin** owns the loopback WebSocket endpoint, command dispatch,
   idempotency cache, and update notification.
-- **CommandSet** contains reflection-discovered Revit API commands.
+- **Contracts** contains the stable host/CommandSet interface boundary.
+- **CommandSet** contains reflection-discovered Revit API commands and is
+  hot-reloadable on Revit 2025+ through a collectible load context.
 - **Updater** waits for Revit to close before replacing locked add-in files.
 
 ## Install
@@ -62,7 +64,8 @@ Two components are required: the C# Revit add-in and the TypeScript MCP server.
    automatically.
 
 The archive contains the add-in manifest, plugin assemblies, runtime
-dependencies, `.deps.json`, `RevitMCP.LICENSE.txt`,
+dependencies, both plugin and CommandSet `.deps.json` files,
+`RevitMCP.Contracts.dll`, `RevitMCP.LICENSE.txt`,
 `RevitMCP.THIRD-PARTY-NOTICES.md`, and `RevitMCP.release-manifest.json`. Do
 not copy only the three primary DLLs.
 
@@ -106,6 +109,27 @@ Then point the MCP client at the absolute path to `server/dist/index.js`.
 Open a Revit project and call `revit_ping`. A successful response includes the
 Revit build and current document information.
 
+## CommandSet hot reload (Revit 2025+)
+
+Ordinary C# command changes no longer require a Revit restart. Build an
+immutable generation, then activate it through MCP:
+
+```powershell
+.\scripts\stage-commandset.ps1 -RevitVersion 2025
+```
+
+Call `revit_get_commandset_status`, then `revit_reload_commandset`. The new
+generation is fully loaded and validated before the active command dictionary
+is swapped; failure leaves the previous generation running. Changes to the
+host plugin, contracts, WebSocket/session lifecycle, or `Revit.Async` still
+require restarting the affected Revit process. See
+[CommandSet hot reload](docs/COMMANDSET_HOT_RELOAD.md) for boundaries and
+safety details.
+
+Stable-host updates can also be installed while other Revit processes remain
+open with `scripts/deploy-host-side-by-side.ps1`; each process adopts the new
+host on its own next restart.
+
 ## Multiple Revit sessions
 
 Each running Revit process publishes a short-lived local discovery record under
@@ -131,12 +155,12 @@ still use the configured legacy port. The server probes the endpoint first and
 uses this fallback only when the ping response has no new session identity; a
 new plugin with a missing registry record is blocked instead of routed blindly.
 
-## Tool inventory (35)
+## Tool inventory (37)
 
 | Category | Count | Tools |
 |---|---:|---|
 | Session | 3 | `revit_list_sessions`, `revit_set_target`, `revit_get_target` |
-| Utility | 2 | `revit_ping`, `revit_get_project_info` |
+| Utility | 4 | `revit_ping`, `revit_get_project_info`, `revit_get_commandset_status`, `revit_reload_commandset` |
 | Query | 10 | `revit_get_levels`, `revit_get_views`, `revit_get_grids`, `revit_query_elements`, `revit_get_element_info`, `revit_get_element_geometry`, `revit_get_selected_elements`, `revit_get_types_by_category`, `revit_get_family_types`, `revit_get_all_categories` |
 | Create | 3 | `revit_create_wall`, `revit_create_floor`, `revit_create_pipe_run` |
 | Modify | 8 | `revit_modify_element_parameter`, `revit_batch_modify_parameters`, `revit_delete_elements`, `revit_move_elements`, `revit_copy_elements`, `revit_duplicate_type`, `revit_rename_type`, `revit_change_instance_type` |

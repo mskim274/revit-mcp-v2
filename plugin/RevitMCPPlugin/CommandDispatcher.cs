@@ -1,104 +1,84 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
-using System.Threading;
-using System.Threading.Tasks;
-using Autodesk.Revit.DB;
 using RevitMCP.CommandSet.Interfaces;
+using RevitMCP.Plugin.Commands;
+using RevitMCP.Plugin.Services;
 
 namespace RevitMCP.Plugin
 {
     /// <summary>
-    /// Auto-discovers and dispatches commands via reflection.
-    /// Adding a new command = adding a C# file to commandset/Commands/.
-    /// No registration code needed.
+    /// Routes stable host commands and the currently active reloadable
+    /// CommandSet generation.
     /// </summary>
-    public class CommandDispatcher
+    public sealed class CommandDispatcher : IDisposable
     {
-        private readonly Dictionary<string, IRevitCommand> _commands;
+        private readonly CommandSetRuntime _runtime;
+        private readonly Dictionary<string, IRevitCommand> _hostCommands;
 
-        public CommandDispatcher()
+        public CommandDispatcher(string revitVersion)
         {
-            _commands = new Dictionary<string, IRevitCommand>();
-            DiscoverCommands();
+            _runtime = new CommandSetRuntime(revitVersion);
+            _hostCommands = new Dictionary<string, IRevitCommand>(
+                StringComparer.Ordinal)
+            {
+                ["get_commandset_status"] =
+                    new GetCommandSetStatusCommand(_runtime),
+                ["reload_commandset"] =
+                    new ReloadCommandSetCommand(_runtime)
+            };
         }
 
-        /// <summary>
-        /// Get a command by name
-        /// </summary>
         public IRevitCommand GetCommand(string name)
         {
-            if (_commands.TryGetValue(name, out var command))
+            if (_hostCommands.TryGetValue(name, out var hostCommand))
+                return hostCommand;
+
+            var command = _runtime.GetCommand(name);
+            if (command != null)
                 return command;
 
             throw new ArgumentException(
-                $"Unknown command: '{name}'. Available commands: {string.Join(", ", _commands.Keys)}");
+                $"Unknown command: '{name}'. Available commands: " +
+                string.Join(", ", GetCommandNames()));
         }
 
-        /// <summary>
-        /// Check if a command exists
-        /// </summary>
-        public bool HasCommand(string name) => _commands.ContainsKey(name);
+        public bool HasCommand(string name)
+        {
+            return _hostCommands.ContainsKey(name) ||
+                   _runtime.HasCommand(name);
+        }
 
-        /// <summary>
-        /// Get all registered command names
-        /// </summary>
-        public IEnumerable<string> GetCommandNames() => _commands.Keys;
+        public IEnumerable<string> GetCommandNames()
+        {
+            return _hostCommands.Keys
+                .Concat(_runtime.GetCommandNames())
+                .OrderBy(name => name, StringComparer.Ordinal)
+                .ToArray();
+        }
 
-        /// <summary>
-        /// Get a recovery suggestion for a failed command
-        /// </summary>
         public string GetSuggestion(string command, Exception ex)
         {
-            // Common error patterns and suggestions
-            if (ex.Message.Contains("not found") || ex.Message.Contains("찾을 수 없"))
-                return $"The specified element or category was not found. Use revit_get_all_categories to list valid names.";
+            if (ex.Message.Contains("not found") ||
+                ex.Message.Contains("찾을 수"))
+                return "The specified element or category was not found. " +
+                       "Use revit_get_all_categories to list valid names.";
 
-            if (ex.Message.Contains("permission") || ex.Message.Contains("권한"))
-                return "This operation may require document edit permissions. Ensure the document is not read-only.";
+            if (ex.Message.Contains("permission") ||
+                ex.Message.Contains("권한"))
+                return "This operation may require document edit permissions. " +
+                       "Ensure the document is not read-only.";
 
             if (ex.Message.Contains("transaction"))
-                return "A Revit transaction error occurred. The document may be in an invalid state. Try again.";
+                return "A Revit transaction error occurred. The document may " +
+                       "be in an invalid state. Try again.";
 
             return $"Command '{command}' failed. Check the parameters and try again.";
         }
 
-        /// <summary>
-        /// Auto-discover all IRevitCommand implementations in the CommandSet assembly
-        /// </summary>
-        private void DiscoverCommands()
+        public void Dispose()
         {
-            var commandSetAssembly = Assembly.GetAssembly(typeof(IRevitCommand));
-            if (commandSetAssembly == null)
-            {
-                System.Diagnostics.Debug.WriteLine("[RevitMCP] WARNING: CommandSet assembly not found");
-                return;
-            }
-
-            var commandTypes = commandSetAssembly.GetTypes()
-                .Where(t => typeof(IRevitCommand).IsAssignableFrom(t)
-                         && !t.IsAbstract
-                         && !t.IsInterface);
-
-            foreach (var type in commandTypes)
-            {
-                try
-                {
-                    var command = (IRevitCommand)Activator.CreateInstance(type);
-                    _commands[command.Name] = command;
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[RevitMCP] Registered command: {command.Name} ({command.Category})");
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[RevitMCP] Failed to register {type.Name}: {ex.Message}");
-                }
-            }
-
-            System.Diagnostics.Debug.WriteLine(
-                $"[RevitMCP] Total commands registered: {_commands.Count}");
+            _runtime.Dispose();
         }
     }
 }

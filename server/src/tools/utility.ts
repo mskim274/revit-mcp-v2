@@ -25,6 +25,7 @@ Returns:
   - connected: boolean — whether the connection is active
   - revit_version: string — e.g. "2025.1"
   - document_name: string — active document name
+  - commandset_hot_reload_ready: boolean — active CommandSet supports generation reload
   - element_count: number — total elements in the document`,
       inputSchema: {},
       annotations: {
@@ -108,6 +109,145 @@ Use this tool at the start of a conversation to understand what project the user
         };
       }
 
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(response.data, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  // ─── revit_get_commandset_status ──────────────────────────────
+  server.registerTool(
+    "revit_get_commandset_status",
+    {
+      title: "Get Revit CommandSet Status",
+      description: `Inspect the reloadable C# CommandSet runtime.
+
+Returns the active generation/hash, available staged generations, persistence
+state, command count, and whether retired AssemblyLoadContexts were collected.
+Revit 2025+ supports hot reload; Revit 2023/2024 reports restart-only mode.`,
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const response = await wsClient.sendCommand("get_commandset_status");
+      if (response.status === "error") {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                code: response.error?.code,
+                error: response.error?.message,
+                suggestion: response.error?.suggestion,
+              }),
+            },
+          ],
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(response.data, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  // ─── revit_reload_commandset ──────────────────────────────────
+  server.registerTool(
+    "revit_reload_commandset",
+    {
+      title: "Reload Revit CommandSet",
+      description: `Activate a staged C# CommandSet generation without restarting Revit 2025+.
+
+First run scripts/stage-commandset.ps1 outside Revit. If generation is omitted,
+the newest valid staged generation is selected. The candidate is fully loaded
+and its command inventory validated before the active generation is swapped.
+Failure leaves the previous generation active. Host, contracts, WebSocket,
+Revit.Async, and startup lifecycle changes still require a Revit restart.`,
+      inputSchema: {
+        generation: z
+          .string()
+          .trim()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Za-z0-9._-]+$/)
+          .optional()
+          .describe(
+            "Exact staged generation from revit_get_commandset_status; omit for latest.",
+          ),
+        allow_command_removal: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Allow an intentional breaking generation that removes existing commands.",
+          ),
+        persist: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("Load this generation automatically on the next Revit start."),
+        idempotency_key: z
+          .string()
+          .trim()
+          .min(1)
+          .max(512)
+          .optional()
+          .describe("Stable retry key for this activation request."),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      const payload: Record<string, unknown> = {
+        allow_command_removal: params.allow_command_removal,
+        persist: params.persist,
+      };
+      if (params.generation !== undefined) {
+        payload.generation = params.generation;
+      }
+      if (params.idempotency_key !== undefined) {
+        payload.idempotency_key = params.idempotency_key;
+      }
+
+      const response = await wsClient.sendCommand(
+        "reload_commandset",
+        payload,
+        60_000,
+      );
+      if (response.status === "error") {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                code: response.error?.code,
+                error: response.error?.message,
+                suggestion: response.error?.suggestion,
+              }),
+            },
+          ],
+        };
+      }
       return {
         content: [
           {

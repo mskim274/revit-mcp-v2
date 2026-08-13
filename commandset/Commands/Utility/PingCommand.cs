@@ -30,6 +30,10 @@ namespace RevitMCP.CommandSet.Commands.Utility
                     ["document_name"] = doc.Title ?? "Untitled",
                     ["document_path"] = doc.PathName ?? "",
                     ["is_workshared"] = doc.IsWorkshared,
+                    // Additive diagnostic used to prove that the active
+                    // CommandSet generation can be replaced without closing
+                    // the owning Revit process.
+                    ["commandset_hot_reload_ready"] = true,
                     ["element_count"] = new FilteredElementCollector(doc)
                         .WhereElementIsNotElementType()
                         .GetElementCount(),

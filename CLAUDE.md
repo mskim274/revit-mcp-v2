@@ -229,7 +229,10 @@ node scripts\test-ws.js query_elements '{"category":"Walls","summary_only":true}
 ```
 
 **Important**:
-- C# changes require Revit restart (DLL locking).
+- CommandSet-only C# changes can be staged with
+  `scripts/stage-commandset.ps1` and hot-reloaded on Revit 2025+.
+- Host, contracts, WebSocket, Revit.Async, and startup lifecycle changes still
+  require restarting the affected Revit process.
 - TypeScript changes only need Claude Desktop restart.
 - End users: C# DLL updates via the auto-update dialog (Plan A zip flow).
 
@@ -321,7 +324,7 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
 
-## Tool Inventory (35 tools)
+## Tool Inventory (37 tools)
 
 ### Session (3)
 - `revit_list_sessions` — Discover live local Revit processes and their active documents.
@@ -334,9 +337,11 @@ on Revit's main thread immediately before dispatch. Switching the active documen
 requires a fresh `revit_set_target`. A normally launched first Revit uses 8181 and
 additional processes auto-bind to 8183–8199; 8182 remains reserved for AutoCAD.
 
-### Utility (2)
+### Utility (4)
 - `revit_ping` — Connection health check
 - `revit_get_project_info` — Project metadata
+- `revit_get_commandset_status` — Active/staged CommandSet generation status
+- `revit_reload_commandset` — Pre-validated Revit 2025+ CommandSet hot swap
 
 ### Query (10)
 - `revit_get_levels`, `revit_get_views`, `revit_get_grids` — Project structure

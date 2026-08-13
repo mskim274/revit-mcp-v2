@@ -5,6 +5,7 @@ namespace Autodesk.Revit.DB
     /// <summary>
     /// Keeps the wire protocol on 64-bit element IDs while still compiling
     /// against Revit 2023/2024, whose ElementId API exposes only Int32.
+    /// This helper is part of the stable host/CommandSet contract.
     /// </summary>
     public static class ElementIdCompatibility
     {

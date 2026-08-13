@@ -1,5 +1,6 @@
 // Direct WebSocket test — bypasses MCP TS server, talks to plugin directly.
 // Usage: node scripts/test-ws.js <command> [json-params]
+// PowerShell-safe alternative: set MCP_PARAMS_JSON, then omit json-params.
 //
 // Picks the port from MCP_PORT (or REVIT_MCP_PORT for legacy compat).
 // Default 8181 (Revit). For AutoCAD: MCP_PORT=8182 node scripts/test-ws.js ping
@@ -9,7 +10,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const command = process.argv[2] || "get_project_info";
-const params = process.argv[3] ? JSON.parse(process.argv[3]) : {};
+const rawParams = process.env.MCP_PARAMS_JSON || process.argv[3];
+const params = rawParams ? JSON.parse(rawParams) : {};
 const id = `test-${Date.now()}`;
 
 const port = process.env.MCP_PORT || process.env.REVIT_MCP_PORT || process.env.AUTOCAD_MCP_PORT || "8181";
