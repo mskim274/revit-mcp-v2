@@ -36,9 +36,9 @@
     "ws": "^8.21.2"
   },
   "devDependencies": {
-    "@types/node": "^22.20.0",
+    "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=20.0.0"
