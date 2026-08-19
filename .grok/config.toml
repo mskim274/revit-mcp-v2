@@ -1,0 +1,20 @@
+# Project-scoped MCP for Grok CLI and Orca (cwd = repo / worktree root).
+# This file outranks ~/.claude.json and ~/.grok/config.toml for the same names.
+#
+# Do not point `cad` at CadMCPServer.exe. That process emits invalid
+# tools/list JSON (missing closing braces), so Grok hangs until startup timeout.
+
+[mcp]
+max_output_bytes = 40000
+
+[mcp_servers.cad]
+command = "node"
+args = ["autocad/server/dist/index.js"]
+enabled = true
+startup_timeout_sec = 60
+
+[mcp_servers.revit]
+command = "node"
+args = ["server/dist/index.js"]
+enabled = true
+startup_timeout_sec = 60

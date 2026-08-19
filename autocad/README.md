@@ -64,7 +64,9 @@ but is not published to npm. For local development:
 1. Run `NETLOAD` in AutoCAD 2025.
 2. Select
    `autocad\plugin\AutoCADMCPPlugin\bin\Release\net8.0-windows\AutoCADMCPPlugin.dll`.
-3. Start the TypeScript MCP server with
+3. Point the MCP client at `autocad/server/dist/index.js` (do not use
+   `CadMCPServer.exe`). Grok CLI / Orca read `.grok/config.toml`; Claude Code
+   / Codex read `.mcp.json`. A manual stdio launch is
    `node autocad\server\dist\index.js`.
 
 The plugin listens only on loopback and defaults to `127.0.0.1:8182`.

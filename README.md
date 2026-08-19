@@ -6,8 +6,8 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Model Context Protocol server for Autodesk Revit. It lets MCP clients such as
-Codex and Claude query, create, modify, review, and export model data in a
-one or more running Revit sessions.
+Grok CLI (including Orca), Codex, and Claude query, create, modify, review,
+and export model data in one or more running Revit sessions.
 
 This development branch registers **37 tools**. The latest stable release may
 contain fewer tools; see [Releases](https://github.com/mskim274/revit-mcp-v2/releases)
@@ -102,7 +102,23 @@ npm ci --workspaces --include-workspace-root
 npm run build
 ```
 
-Then point the MCP client at the absolute path to `server/dist/index.js`.
+Then point the MCP client at `server/dist/index.js`. For AutoCAD, point a
+second server named `cad` at `autocad/server/dist/index.js`. Do not use
+`CadMCPServer.exe`; Grok times out on its invalid `tools/list` JSON.
+
+Grok CLI and Orca already pick up the repo file `.grok/config.toml`.
+Claude Code / Codex pick up `.mcp.json`. Confirm with:
+
+```powershell
+grok mcp list
+grok mcp doctor cad
+grok mcp doctor revit
+```
+
+An already-open Grok session needs `/mcps` → `r`, or a new session.
+
+See [docs/SETUP.md](docs/SETUP.md#7-mcp-클라이언트-설정-grok-cli--orca--claude)
+for Claude Desktop and `~/.claude.json` examples.
 
 ### 4. Verify
 

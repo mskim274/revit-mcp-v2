@@ -9,6 +9,10 @@ changes are still fair game.
 ## [Unreleased]
 
 ### Added
+- Added project MCP configs for Grok CLI / Orca (`.grok/config.toml`) and
+  Claude Code / Codex (`.mcp.json`), both pointing `cad` and `revit` at the
+  TypeScript stdio servers. Documented why `CadMCPServer.exe` must not be used
+  (invalid `tools/list` JSON causes a Grok startup timeout).
 - Added Revit 2025+ CommandSet hot reload with a stable contracts assembly,
   collectible `AssemblyLoadContext`, immutable hash-verified generations,
   atomic pre-validated swaps, persisted activation with baseline fallback,

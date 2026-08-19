@@ -184,6 +184,21 @@ registerCreateTools(server, wsClient);
 
 ## Build & Deploy
 
+### MCP clients (Grok CLI / Orca / Claude)
+
+`cad` and `revit` must spawn this repo's TypeScript servers:
+
+- `revit` → `node server/dist/index.js` (plugin :8181)
+- `cad` → `node autocad/server/dist/index.js` (plugin :8182)
+
+Repo files: `.grok/config.toml` (Grok CLI / Orca) and `.mcp.json` (Claude Code
+/ Codex). Do **not** point `cad` at `CadMCPServer.exe` — its `tools/list`
+JSON is invalid and Grok hangs until the 65s startup timeout.
+
+After changing MCP config, refresh Grok with `/mcps` → `r` or start a new
+session. Direct plugin probe: `node scripts/test-ws.js ping` (Revit) and
+`$env:MCP_PORT=8182; node scripts/test-ws.js ping` (AutoCAD).
+
 ### Local development
 
 ```powershell

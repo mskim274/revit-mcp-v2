@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "cad": {
+      "command": "node",
+      "args": ["autocad/server/dist/index.js"]
+    },
+    "revit": {
+      "command": "node",
+      "args": ["server/dist/index.js"]
+    }
+  }
+}

@@ -21,6 +21,7 @@
 | **Node.js 20+** | TypeScript MCP 서버 빌드 | https://nodejs.org |
 | **Git** | 저장소 클론 | https://git-scm.com |
 | **Claude Desktop** | MCP 클라이언트 | https://claude.ai/download |
+| **Grok CLI** (선택) | Orca / 터미널 MCP 클라이언트 | `grok` 바이너리 (`~/.grok/bin`) |
 | **winget** | Windows 패키지 매니저 (Win11 기본 포함) | — |
 
 Windows 10/11 전용 (플러그인이 WPF 사용).
@@ -137,19 +138,71 @@ dir "$env:APPDATA\Autodesk\Revit\Addins\2025" | findstr /I "RevitMCP revit-mcp"
 
 ---
 
-## 7. Claude Desktop MCP 설정
+## 7. MCP 클라이언트 설정 (Grok CLI / Orca / Claude)
 
-`%APPDATA%\Claude\claude_desktop_config.json` 편집. 기존 다른 MCP 서버가
-있으면 **mcpServers 객체 안에 추가**하면 됩니다.
+CAD와 Revit 모두 **이 저장소의 TypeScript stdio 서버**를 가리켜야 합니다.
+
+| 서버 | 진입점 | 플러그인 포트 |
+|---|---|---|
+| `revit` | `server/dist/index.js` | 8181 (추가 Revit은 8183–8199) |
+| `cad` | `autocad/server/dist/index.js` | 8182 |
+
+`CadMCPServer.exe` (`%LOCALAPPDATA%\RevitMCP\Server\cad\`)는 쓰지 마세요.
+`tools/list` JSON이 깨져 있어서 Grok/Orca가 65초 타임아웃으로 연결에 실패합니다.
+
+사전 조건: 저장소 루트에서 `npm run build`가 되어 있고, Revit/AutoCAD 플러그인이
+로드된 문서가 열려 있어야 합니다.
+
+### 7.1 Grok CLI / Orca (권장)
+
+이 저장소의 `.grok/config.toml`이 Grok 프로젝트 설정입니다. Orca에서 Grok을
+띄우면 작업 폴더가 저장소(또는 동일 구조의 worktree) 루트이므로 이 파일이
+그대로 적용됩니다.
+
+```toml
+[mcp_servers.cad]
+command = "node"
+args = ["autocad/server/dist/index.js"]
+enabled = true
+startup_timeout_sec = 45
+
+[mcp_servers.revit]
+command = "node"
+args = ["server/dist/index.js"]
+enabled = true
+startup_timeout_sec = 45
+```
+
+확인:
+
+```powershell
+cd <repo-root>
+grok mcp list
+grok mcp doctor cad
+grok mcp doctor revit
+```
+
+`cad (project)` / `revit (project)`로 보이면 성공입니다. 이미 열린 Grok 세션은
+`/mcps`에서 `r`로 새로고침하거나 세션을 다시 시작하세요.
+
+### 7.2 Claude Code / Codex (`.mcp.json`)
+
+저장소 루트 `.mcp.json`도 같은 Node 진입점을 등록합니다. Claude Code와 Codex가
+프로젝트 MCP를 읽을 때 사용합니다.
+
+### 7.3 Claude Desktop / `~/.claude.json`
+
+Grok은 Claude MCP 설정도 읽어 옵니다. 이름이 겹치면 `.grok/config.toml`이 이깁니다.
+Desktop 설정은 `%APPDATA%\Claude\claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "revit-mcp-v2": {
+    "revit": {
       "command": "node",
       "args": ["C:\\Users\\<사용자명>\\<경로>\\revit-mcp-v2\\server\\dist\\index.js"]
     },
-    "cad-mcp-v2": {
+    "cad": {
       "command": "node",
       "args": ["C:\\Users\\<사용자명>\\<경로>\\revit-mcp-v2\\autocad\\server\\dist\\index.js"]
     }
@@ -159,14 +212,13 @@ dir "$env:APPDATA\Autodesk\Revit\Addins\2025" | findstr /I "RevitMCP revit-mcp"
 
 > **JSON에서는 백슬래시를 두 번** (`\\`) 써야 합니다.
 
-기존 설정을 백업하고 편집하는 것이 안전:
 ```powershell
 $cfg = "$env:APPDATA\Claude\claude_desktop_config.json"
 Copy-Item $cfg "$cfg.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 notepad $cfg
 ```
 
-설정 후 **Claude Desktop 완전 종료 → 재시작** (트레이 아이콘에서 Quit).
+Claude Desktop은 트레이 아이콘에서 Quit 후 재시작하세요.
 
 ---
 
@@ -183,10 +235,11 @@ notepad $cfg
    # {"status":"ok","server":"revit-mcp-plugin"}
    ```
 
-### Claude Desktop MCP 연결 확인
-1. Claude Desktop 재시작
-2. 새 대화에서: "Call revit_ping."
-3. 프로젝트 이름 + Revit 빌드 + 요소 수 반환되면 성공
+### Claude / Grok MCP 연결 확인
+1. 클라이언트를 재시작하거나 Grok TUI에서 `/mcps` → `r`
+2. 새 대화에서 `revit_ping`, AutoCAD가 열려 있으면 `cad_ping`
+3. Revit은 빌드 + 문서명 + 요소 수, AutoCAD는 버전 + 도면명 + 엔티티 수가 오면 성공
+4. Grok 도구 이름은 `revit__revit_ping`, `cad__cad_ping` 형태입니다
 
 ### Revit 여러 개 실행
 
@@ -222,8 +275,11 @@ notepad $cfg
 - **HTTP 401**: 플러그인과 MCP 서버가 같은
   `%LOCALAPPDATA%\RevitMCP\auth-token` 또는 같은
   `REVIT_MCP_AUTH_TOKEN`을 사용 중인지 확인
-- **MCP 서버 못 찾음**: `claude_desktop_config.json`의 경로에 백슬래시
-  두 번 들어갔는지 확인
+- **MCP 서버 못 찾음**: JSON 경로의 백슬래시가 두 번인지, `npm run build` 후
+  `server/dist/index.js`와 `autocad/server/dist/index.js`가 있는지 확인
+- **CAD MCP 65초 타임아웃**: `cad`가 `CadMCPServer.exe`를 가리키고 있으면
+  `.grok/config.toml` / `.mcp.json` / `~/.claude.json`을 이 저장소의
+  `autocad/server/dist/index.js`로 바꾼 뒤 세션을 재시작
 - **DLL 로드 실패**: Revit → File → Options → Add-ins 탭에서 "RevitMCPPlugin"
   활성 여부 확인
 
@@ -280,6 +336,8 @@ git reset --soft HEAD~1   # 커밋 풀기 (변경사항은 유지)
 | GitHub 인증 | Windows 자격증명 관리자 (keyring) |
 | `REVIT_*_PATH` 환경변수 | 시스템 User 환경변수 |
 | Claude Desktop MCP 설정 | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Grok CLI / Orca MCP 설정 | 저장소 `.grok/config.toml` (프로젝트) |
+| Claude Code / Codex MCP 설정 | 저장소 `.mcp.json` |
 | Revit Addins 폴더 DLL | `%APPDATA%\Autodesk\Revit\Addins\<year>\` |
 | node_modules / bin / obj | 각 머신에서 빌드 |
 | Revit 라이선스 | 각 머신에서 활성화 |
@@ -301,12 +359,14 @@ git reset --soft HEAD~1   # 커밋 풀기 (변경사항은 유지)
 ```
 저장소:                          C:\Users\<user>\<path>\revit-mcp-v2
 플러그인 DLL 배포 위치:          %APPDATA%\Autodesk\Revit\Addins\2025
-TS 서버 진입점 (Claude 사용):    server\dist\index.js
+TS 서버 진입점:                  server\dist\index.js
 AutoCAD TS 서버 진입점:          autocad\server\dist\index.js
+Grok / Orca 프로젝트 MCP:        .grok\config.toml
+Claude Code / Codex 프로젝트 MCP: .mcp.json
+Claude Desktop 설정:             %APPDATA%\Claude\claude_desktop_config.json
 플러그인 업데이트 캐시:          %LOCALAPPDATA%\RevitMCP\update-cache.json
 다운로드된 플러그인 zip:         %LOCALAPPDATA%\RevitMCP\Updates\v<ver>\
 응답 오버플로우 spill:           %TEMP%\revit-mcp-spill\
-Claude Desktop 설정:             %APPDATA%\Claude\claude_desktop_config.json
 Revit 저널 (디버깅):             %LOCALAPPDATA%\Autodesk\Revit\Autodesk Revit 2025\Journals
 ```
 
