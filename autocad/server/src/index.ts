@@ -13,6 +13,10 @@ import { AcadWebSocketClient } from "./services/websocket-client.js";
 import { registerUtilityTools } from "./tools/utility.js";
 import { registerQueryTools } from "./tools/query.js";
 import { registerCreateTools } from "./tools/create.js";
+import { registerModifyTools } from "./tools/modify.js";
+import { registerScriptTools } from "./tools/script.js";
+import { registerBlockTools } from "./tools/blocks.js";
+import { registerExportTools } from "./tools/export.js";
 
 async function main(): Promise<void> {
   const server = new McpServer({
@@ -25,6 +29,10 @@ async function main(): Promise<void> {
   registerUtilityTools(server, wsClient);
   registerQueryTools(server, wsClient);
   registerCreateTools(server, wsClient);
+  registerModifyTools(server, wsClient);
+  registerScriptTools(server, wsClient);
+  registerBlockTools(server, wsClient);
+  registerExportTools(server, wsClient);
 
   wsClient.connect().catch((error) => {
     console.error(

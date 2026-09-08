@@ -71,7 +71,10 @@ namespace AutoCADMCP.CommandSet.Commands
                 var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
                 var line = new Line(start.Value, end.Value);
-                if (layerName != null) line.Layer = layerName;
+                line.SetDatabaseDefaults(db);
+                line.LayerId = layerName != null
+                    ? layerTable[layerName]
+                    : db.Clayer;
 
                 ms.AppendEntity(line);
                 tr.AddNewlyCreatedDBObject(line, true);

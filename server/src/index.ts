@@ -45,8 +45,6 @@ async function main(): Promise<void> {
   registerVisualizeTools(server, wsClient);
   registerScriptTools(server, wsClient);
 
-  // TODO: Sprint 5 — registerAdvancedTools(server, wsClient);
-
   // Attempt initial WebSocket connection (non-blocking)
   wsClient.connect().catch((error) => {
     console.error(

@@ -10,6 +10,7 @@
  *   revit_duplicate_type           — Duplicate an ElementType under a new name
  *   revit_rename_type              — Rename an ElementType
  *   revit_change_instance_type     — Reassign instances to a different type
+ *   revit_modify_wall_height_to_linked_soffit — Measure/write wall heights from linked floors
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -122,6 +123,41 @@ const BATCH_MODIFY_INPUT_SCHEMA = z
     }
   });
 
+const LINKED_SOFFIT_INPUT_SCHEMA = z
+  .object({
+    element_ids: z
+      .array(elementIdSchema("Host wall ElementId"))
+      .min(1)
+      .max(50)
+      .optional()
+      .describe("Host wall IDs; omit to use the current Revit UI selection."),
+    link_name_contains: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .default("ST_")
+      .describe(
+        'Case-insensitive substring matched against loaded Revit link instance names. Default "ST_".'
+      ),
+    step_tolerance_mm: z
+      .number()
+      .finite()
+      .nonnegative()
+      .optional()
+      .default(20)
+      .describe("Soffit-height delta treated as a step; millimetres, default 20."),
+    dry_run: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe(
+        "Default true: measure and report only. Set false explicitly to write unconnected wall heights."
+      ),
+    idempotency_key: idempotencyKeySchema(),
+  })
+  .strict();
+
 export function registerModifyTools(
   server: McpServer,
   wsClient: RevitWebSocketClient
@@ -169,6 +205,35 @@ Examples:
         idempotency_key: params.idempotency_key,
       });
     }
+  );
+
+  server.registerTool(
+    "revit_modify_wall_height_to_linked_soffit",
+    {
+      title: "Set Wall Heights to Linked Structural Soffits",
+      description: `Measure up to 50 host walls against floors in loaded Revit links and optionally set each wall's unconnected height to the nearest soffit above it.
+
+dry_run defaults to true and performs no model write. Set dry_run=false explicitly only after reviewing the measured wall rows. element_ids defaults to the current UI selection. link_name_contains uses a case-insensitive CONTAINS match against loaded link instance names and defaults to "ST_".
+
+The command samples each wall at 10%, 50%, and 90%; when the soffit changes by more than step_tolerance_mm it uses the lowest soffit to avoid penetration. It rejects attached-top walls, missing soffits, implausible 100-20000 mm results, and batches over 50 with actionable reasons. Writes use one transaction and post-transaction geometry verification.
+
+Pass idempotency_key and reuse it only for an identical retry after an uncertain timeout.`,
+      inputSchema: LINKED_SOFFIT_INPUT_SCHEMA,
+      annotations: MODIFY_ANNOTATIONS,
+    },
+    async (params) =>
+      sendAndFormat(
+        wsClient,
+        "modify_wall_height_to_linked_soffit",
+        {
+          element_ids: params.element_ids ?? null,
+          link_name_contains: params.link_name_contains ?? "ST_",
+          step_tolerance_mm: params.step_tolerance_mm ?? 20,
+          dry_run: params.dry_run ?? true,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      )
   );
 
   // ─── revit_delete_elements ───

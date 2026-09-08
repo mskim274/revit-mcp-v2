@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@kimminsub/revit-mcp.svg)](https://www.npmjs.com/package/@kimminsub/revit-mcp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mskim274/revit-mcp-v2/blob/main/LICENSE)
 
-The TypeScript MCP server for Autodesk Revit. It exposes 37 tools for session
+The TypeScript MCP server for Autodesk Revit. It exposes 43 tools for session
 selection, CommandSet hot reload, query, creation, modification, view control,
 export, visualization, and controlled C# scripting.
 
@@ -74,14 +74,14 @@ requested command; a new plugin with a missing record fails closed.
 |---|---:|
 | Session | 3 |
 | Utility | 4 |
-| Query | 10 |
-| Create | 3 |
-| Modify | 8 |
-| View | 5 |
-| Export | 1 |
+| Query | 12 |
+| Create | 4 |
+| Modify | 9 |
+| View | 6 |
+| Export | 2 |
 | Visualize / Review | 2 |
 | Script | 1 |
-| **Total** | **37** |
+| **Total** | **43** |
 
 Full tool and safety documentation is maintained in the
 [repository README](https://github.com/mskim274/revit-mcp-v2#readme) and

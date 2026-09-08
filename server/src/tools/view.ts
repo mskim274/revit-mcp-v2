@@ -93,6 +93,34 @@ const DUPLICATE_VIEWS_INPUT_SCHEMA = z
     }
   });
 
+const VIEWPORT_PLACEMENT_SCHEMA = z
+  .object({
+    view_id: elementIdSchema("Existing non-template view ElementId"),
+    point: z
+      .tuple([z.number().finite(), z.number().finite()])
+      .describe("Viewport center [x, y] in the top-level input_unit."),
+  })
+  .strict();
+
+const PLACE_VIEWS_ON_SHEET_INPUT_SCHEMA = z
+  .object({
+    sheet_id: elementIdSchema("Existing ViewSheet ElementId"),
+    placements: z
+      .array(VIEWPORT_PLACEMENT_SCHEMA)
+      .min(1)
+      .max(50)
+      .describe("One to 50 existing views and desired viewport centers."),
+    input_unit: z
+      .enum(["feet", "mm"])
+      .optional()
+      .default("feet")
+      .describe(
+        'Coordinate unit for all viewport centers: Revit sheet-space feet or millimetres.'
+      ),
+    idempotency_key: idempotencyKeySchema(),
+  })
+  .strict();
+
 export function registerViewTools(
   server: McpServer,
   wsClient: RevitWebSocketClient
@@ -188,6 +216,13 @@ elements. Use revit_reset_view_isolation to restore normal visibility.`,
           .min(1)
           .max(500)
           .describe("ElementIds to select (1-500)."),
+        zoom: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "After selecting, zoom the active Revit view to show the selected elements. Default false."
+          ),
         idempotency_key: idempotencyKeySchema(),
       },
       annotations: VIEW_ANNOTATIONS,
@@ -198,6 +233,35 @@ elements. Use revit_reset_view_isolation to restore normal visibility.`,
         "select_elements",
         {
           element_ids: params.element_ids,
+          zoom: params.zoom ?? false,
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      )
+  );
+
+  server.registerTool(
+    "revit_place_views_on_sheet",
+    {
+      title: "Place Existing Views on a Sheet (batch)",
+      description: `Place 1-50 existing views as standard viewports on one existing sheet in a single transaction.
+
+Use revit_get_sheets for sheet_id and revit_get_views for view_id. point is the viewport center [x,y] in Revit sheet-space feet by default, or millimetres when input_unit="mm". This tool never creates a sheet.
+
+Templates, schedules, sheets, unsupported view types, and views that are already placed are rejected per item with a reason. Schedules require ScheduleSheetInstance and are outside this tool's contract. The response verifies the first created viewport after commit.
+
+Pass idempotency_key and reuse it only for an identical retry after an uncertain timeout.`,
+      inputSchema: PLACE_VIEWS_ON_SHEET_INPUT_SCHEMA,
+      annotations: DUPLICATE_ANNOTATIONS,
+    },
+    async (params) =>
+      sendAndFormat(
+        wsClient,
+        "place_views_on_sheet",
+        {
+          sheet_id: params.sheet_id,
+          placements: params.placements,
+          input_unit: params.input_unit ?? "feet",
           idempotency_key: params.idempotency_key,
         },
         BATCH_TIMEOUT_MS

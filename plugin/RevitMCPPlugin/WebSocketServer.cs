@@ -882,6 +882,15 @@ namespace RevitMCP.Plugin
                     throw new InvalidOperationException(
                         "Revit selection did not match the requested element IDs.");
                 }
+                var zoom = data.TryGetValue("zoom", out var zoomValue) &&
+                           zoomValue is bool zoomRequested &&
+                           zoomRequested;
+                if (zoom)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    uiDocument.ShowElements(selectionIds);
+                    data["zoomed"] = true;
+                }
                 return;
             }
 

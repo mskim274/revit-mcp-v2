@@ -50,6 +50,11 @@ updater/publish/
 
 # Local project/customer-specific working files (never publish)
 /.local/
+/docs/CAD_REVIT_DOOR_TAG_CHECK.md
+/docs/PODIUM_B1F_ROOM_FINISH_LOOKUP.md
+/docs/PODIUM_B2F_ROOM_FINISH_LOOKUP.md
+/포디움_3F_CAD_*.json
+/.skill-staging/
 
 # Ad-hoc working files / scratch exports
 # (Data dumps, DAX/M expression drafts, generated TMDL — not source)

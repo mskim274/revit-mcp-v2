@@ -34,8 +34,44 @@ namespace AutoCADMCP.CommandSet.Commands
                 var layoutDict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
                 foreach (DBDictionaryEntry entry in layoutDict)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var layout = (Layout)tr.GetObject(entry.Value, OpenMode.ForRead);
                     layoutNames.Add(layout.LayoutName);
+                }
+
+                // Xrefs are block table records flagged as external
+                // references. This is metadata only; no attach/detach action
+                // is exposed by get_drawing_info.
+                var xrefs = new List<Dictionary<string, object>>();
+                var blockTable = (BlockTable)tr.GetObject(
+                    db.BlockTableId,
+                    OpenMode.ForRead);
+                foreach (ObjectId blockId in blockTable)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var block = (BlockTableRecord)tr.GetObject(
+                        blockId,
+                        OpenMode.ForRead);
+                    if (!block.IsFromExternalReference &&
+                        !block.IsFromOverlayReference)
+                    {
+                        continue;
+                    }
+
+                    var status = block.XrefStatus;
+                    var isLoaded =
+                        status == XrefStatus.Resolved && !block.IsUnloaded;
+                    var isUnresolved =
+                        status != XrefStatus.Resolved &&
+                        status != XrefStatus.Unloaded;
+                    xrefs.Add(new Dictionary<string, object>
+                    {
+                        ["name"] = block.Name,
+                        ["path"] = block.PathName ?? "",
+                        ["is_loaded"] = isLoaded,
+                        ["is_unresolved"] = isUnresolved,
+                        ["handle"] = block.Handle.Value.ToString("X"),
+                    });
                 }
 
                 // Model-space extents from EXTMIN/EXTMAX system variables.
@@ -69,6 +105,7 @@ namespace AutoCADMCP.CommandSet.Commands
                     ["model_space_extents"] = extents,
                     ["layouts"] = layoutNames,
                     ["layout_count"] = layoutNames.Count,
+                    ["xrefs"] = xrefs,
                 };
 
                 return Task.FromResult(CommandResult.Ok(data));

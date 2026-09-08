@@ -58,6 +58,36 @@ omits the `using` so catches resolve to `System.Exception` cleanly.
 
 Both servers can run simultaneously on the same machine.
 
+## Tool inventory (15 tools)
+
+- Utility: `cad_ping`
+- Drawing/query: `cad_get_drawing_info` (including xref status),
+  `cad_get_layers`, `cad_query_entities` (`space=current|model|paper`),
+  `cad_extract_table`
+- Selection: `cad_get_selected_entities`, `cad_get_selection_texts`,
+  `cad_get_selection_dimensions`, `cad_parse_grid_schedule`
+- Create: `cad_create_line`, `cad_create_entities`
+- Blocks: `cad_blocks` — list loaded insertable definitions/counts or insert
+  1-50 references of one exact-matched definition into the current space.
+- Modify: `cad_modify_entities`
+- Export: `cad_plot_pdf` — current or exact-named layout to a verified PDF;
+  default directory `%TEMP%\cad-mcp-exports`, `overwrite=false`.
+- Script escape hatch: `cad_execute_script`
+
+`cad_execute_script` is disabled unless AutoCAD starts with
+`AUTOCAD_MCP_ENABLE_SCRIPT=1`. Its denylist is not a security sandbox, query
+mode aborts the dispatcher-owned transaction, modify mode commits it, and
+there is no per-execution UI approval dialog.
+
+### AutoCAD 2027 runtime boundary
+
+The current projects intentionally target `net8.0-windows` and the AutoCAD
+2025 SDK. Autodesk's
+[managed .NET compatibility table](https://help.autodesk.com/cloudhelp/2027/ENU/AutoCAD-Customization/files/GUID-A6C680F2-DE2E-418A-A182-E4884073338A.htm)
+requires the AutoCAD 2027 SDK and .NET 10 for AutoCAD 2027. Do not advertise
+2027 support by merely adding a target framework; ship a separately tested
+`net10.0-windows` host/CommandSet build against the matching Autodesk SDK.
+
 ## Adding a new AutoCAD command
 
 Same three-file recipe as Revit (see

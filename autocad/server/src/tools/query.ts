@@ -60,7 +60,7 @@ export function registerQueryTools(
     "cad_get_drawing_info",
     {
       title: "Get AutoCAD Drawing Info",
-      description: `Drawing-level metadata: AutoCAD version, document path, units (insertion units, angle base), model-space extents (or null on empty drawings), layout names.
+      description: `Drawing-level metadata: AutoCAD version, document path, units (insertion units, angle base), model-space extents (or null on empty drawings), layout names, and read-only xref metadata. Each xrefs[] item includes name, path, is_loaded, is_unresolved, and handle; this tool never attaches or detaches references.
 
 Cheap read — no per-entity iteration. Run this at the start of a session to confirm what drawing the user is in.`,
       inputSchema: {},
@@ -134,9 +134,11 @@ To extract a specific table, pass its handle (from cad_query_entities entity_typ
     "cad_query_entities",
     {
       title: "Search AutoCAD Entities",
-      description: `Search model-space entities by type and/or layer. Defaults to summary mode (counts grouped by type and by layer) — use this first on unfamiliar drawings.
+      description: `Search entities in the current space, model space, or every paper-space layout by type and/or layer. Defaults to space="current" and summary mode (counts grouped by type, layer, and scanned layout) — use this first on unfamiliar drawings.
 
-Set summary_only=false for paginated detail (default 50 per page, max 200). Each detail row includes id, type, layer, color, plus type-specific extras (start/end for lines, center/radius for circles, text for text, position+name for block references).
+Set summary_only=false for paginated detail (default 50 per page, max 200). Each detail row includes id and handle (the same decimal handle string accepted by cad_modify_entities), type, layer, color, plus type-specific extras (start/end for lines, center/radius for circles, text for text, position+name for block references).
+
+space="current" scans db.CurrentSpaceId (the active model or paper layout), space="model" scans only model space, and space="paper" scans all non-model layouts. Detail rows include space and layout_name so paper-layout results are not ambiguous.
 
 For large drawings (10K+ entities), always start with summary_only=true and a specific entity_type filter.`,
       inputSchema: {
@@ -144,6 +146,8 @@ For large drawings (10K+ entities), always start with summary_only=true and a sp
           .describe("DXF class name to filter (e.g. 'Line', 'Circle', 'BlockReference', 'MText'). Case-insensitive. Omit for all."),
         layer: z.string().optional()
           .describe("Exact layer name. Case-insensitive. Omit for all layers."),
+        space: z.enum(["current", "model", "paper"]).optional().default("current")
+          .describe("current (default), model only, or all paper-space layouts."),
         summary_only: z.boolean().optional().default(true)
           .describe("True (default): counts only. False: paginated detail."),
         limit: z.number().int().min(1).max(200).optional()
@@ -158,7 +162,10 @@ For large drawings (10K+ entities), always start with summary_only=true and a sp
         openWorldHint: false,
       },
     },
-    async (params) => sendAndFormat(wsClient, "query_entities", params)
+    async (params) => sendAndFormat(wsClient, "query_entities", {
+      ...params,
+      space: params.space ?? "current",
+    })
   );
 
   server.registerTool(

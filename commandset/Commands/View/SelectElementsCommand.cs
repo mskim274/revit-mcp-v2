@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
+using RevitMCP.CommandSet.Helpers;
 using RevitMCP.CommandSet.Interfaces;
 
 namespace RevitMCP.CommandSet.Commands.View
@@ -15,6 +16,7 @@ namespace RevitMCP.CommandSet.Commands.View
     ///
     /// Parameters:
     ///   element_ids (int[], required) — Element IDs to select
+    ///   zoom        (bool, optional)  — Zoom active view to selection (default false)
     /// </summary>
     public class SelectElementsCommand : IRevitCommand
     {
@@ -42,6 +44,18 @@ namespace RevitMCP.CommandSet.Commands.View
                     return Task.FromResult(CommandResult.Fail(
                         $"Too many element IDs: {elementIds.Count} (max 500).",
                         "Select in batches of at most 500 elements."));
+
+                if (!RawParameterValidation.TryGetOptionalStrictBool(
+                        parameters,
+                        "zoom",
+                        defaultValue: false,
+                        out var zoom,
+                        out var validationError))
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        validationError,
+                        "Pass zoom as true or false; omit it to keep the current zoom."));
+                }
 
                 // Validate elements exist and collect info
                 var validIds = new List<long>();
@@ -81,6 +95,7 @@ namespace RevitMCP.CommandSet.Commands.View
                     ["valid_count"] = validIds.Count,
                     ["invalid_ids"] = invalidIds,
                     ["selected_count"] = validIds.Count,
+                    ["zoom"] = zoom,
                     ["element_ids"] = validIds,
                     ["elements"] = elementInfos
                 }));

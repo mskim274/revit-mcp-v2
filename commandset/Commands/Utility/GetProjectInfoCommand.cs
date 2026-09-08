@@ -64,7 +64,38 @@ namespace RevitMCP.CommandSet.Commands.Utility
                     ["revit_version"] = doc.Application.VersionNumber
                 };
 
+                if (doc.IsWorkshared)
+                {
+                    var worksets = new List<Dictionary<string, object>>();
+                    foreach (Workset workset in new FilteredWorksetCollector(doc))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var item = new Dictionary<string, object>
+                        {
+                            ["id"] = workset.Id.IntegerValue,
+                            ["name"] = workset.Name ?? "",
+                            ["kind"] = workset.Kind.ToString(),
+                            ["is_open"] = workset.IsOpen
+                        };
+                        if (!string.IsNullOrWhiteSpace(workset.Owner))
+                            item["owner"] = workset.Owner;
+                        worksets.Add(item);
+                    }
+
+                    worksets.Sort((left, right) => StringComparer.OrdinalIgnoreCase.Compare(
+                        left["name"]?.ToString(),
+                        right["name"]?.ToString()));
+                    result["workset_count"] = worksets.Count;
+                    result["worksets"] = worksets;
+                }
+
                 return Task.FromResult(CommandResult.Ok(result));
+            }
+            catch (OperationCanceledException)
+            {
+                return Task.FromResult(CommandResult.Fail(
+                    "get_project_info was cancelled due to timeout.",
+                    "Retry when Revit is idle."));
             }
             catch (Exception ex)
             {
