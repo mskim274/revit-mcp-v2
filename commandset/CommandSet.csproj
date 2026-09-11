@@ -75,8 +75,17 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.9.2" />
   </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(CommandSetContractsPath)' == ''">
     <ProjectReference Include="..\contracts\RevitMCP.Contracts.csproj" />
+  </ItemGroup>
+
+  <!-- CommandSet-only hotfixes may target the exact already-running contract.
+       Never relabel a newly built contract hash as the host contract hash. -->
+  <ItemGroup Condition="'$(CommandSetContractsPath)' != ''">
+    <Reference Include="RevitMCP.Contracts">
+      <HintPath>$(CommandSetContractsPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>

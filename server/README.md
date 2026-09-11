@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@kimminsub/revit-mcp.svg)](https://www.npmjs.com/package/@kimminsub/revit-mcp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mskim274/revit-mcp-v2/blob/main/LICENSE)
 
-The TypeScript MCP server for Autodesk Revit. It exposes 37 tools for session
+The TypeScript MCP server for Autodesk Revit. It exposes 44 tools for session
 selection, CommandSet hot reload, query, creation, modification, view control,
 export, visualization, and controlled C# scripting.
 
@@ -73,21 +73,33 @@ requested command; a new plugin with a missing record fails closed.
 | Category | Count |
 |---|---:|
 | Session | 3 |
+| Coordination | 1 |
 | Utility | 4 |
-| Query | 10 |
-| Create | 3 |
-| Modify | 8 |
-| View | 5 |
-| Export | 1 |
+| Query | 12 |
+| Create | 4 |
+| Modify | 9 |
+| View | 6 |
+| Export | 2 |
 | Visualize / Review | 2 |
 | Script | 1 |
-| **Total** | **37** |
+| **Total** | **44** |
 
 Full tool and safety documentation is maintained in the
 [repository README](https://github.com/mskim274/revit-mcp-v2#readme) and
 [CLAUDE.md](https://github.com/mskim274/revit-mcp-v2/blob/main/CLAUDE.md).
 
 ## Security
+
+`revit_work_scope` coordinates assignments across separate MCP processes using
+one host-owned registry. Check `op=status` for actual host support first.
+If `supported=false`, already-authorized single-writer work can use existing
+tools with fresh reads and verification; no reservation exception approval is
+needed. Never interpret target, connection or reservation-conflict errors as
+unsupported functionality. For supported coordination, each process remembers
+its own token per Revit session/document. Acquire before querying and editing,
+renew within its TTL, and release when finished. See the repository's
+[coordination guide](https://github.com/mskim274/revit-mcp-v2/blob/main/docs/WORK_SCOPE_COORDINATION.md)
+for supported scopes, stale-evidence recovery and installation requirements.
 
 Keep `REVIT_MCP_HOST` on loopback. The server can invoke model mutations, and
 `revit_execute_script` is not a security sandbox. Review the

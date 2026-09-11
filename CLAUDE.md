@@ -1,5 +1,13 @@
 # Revit MCP V2 — Agent Instructions
 
+## BIM modeling and review scope
+
+For BIM modeling, drawing review, or parameter corrections, read
+[the scoped BIM workflow](docs/BIM_WORKFLOW.md). Apply the user's current
+document, floor, category, and element scope explicitly. Local project evidence
+under `bim-standards/` and the output/review folders is private working data;
+keep historical facts separate from current model checks and public guidance.
+
 ## Architecture
 
 3-layer architecture: **MCP Server (TypeScript)** ↔ **WebSocket** ↔ **Revit Plugin (C#)** + **CommandSet (C#)**.
@@ -30,7 +38,7 @@ Claude Desktop ──stdio──▶ MCP Server (TS)
 - **Transactions**: Create/Modify commands MUST wrap Revit API mutations in `Transaction`. Query commands are read-only (no transaction needed).
 - **UIDocument Action Descriptors**: Commands needing UIDocument access (view switching, element selection, isolation) cannot use UIDocument directly from CommandSet (only `Document` is passed). Instead, they return an `action` field in `CommandResult.Data`. The plugin's `WebSocketServer.cs` post-processes these actions after command execution:
   - `action: "activate_view"` + `view_id` → `_uiApp.ActiveUIDocument.ActiveView = view`
-  - `action: "select_elements"` + `element_ids` → `_uiApp.ActiveUIDocument.Selection.SetElementIds(ids)`
+  - `action: "select_elements"` + `element_ids` (+ optional `zoom=true`) → selection, then `UIDocument.ShowElements(ids)` when requested
   - `action: "isolate_in_view"` + `element_ids` → `activeView.IsolateElementsTemporary(ids)`
 
 ## Project Structure
@@ -337,9 +345,13 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [x] **Phase P1** (v0.3.0+): tag-triggered CI release + one-click auto-install
 - [x] Phase P2: npm publish the TS server as `@kimminsub/revit-mcp`
 - [ ] Phase P3: WiX MSI installer + code signing
-- [ ] Sprint 5: Advanced (worksharing, linked models, family loading, export)
+- [x] Sprint 5 P0: worksharing metadata, linked-model discovery/query, and view image export
 
-## Tool Inventory (37 tools)
+## Tool Inventory (59 registered: Revit 44 + AutoCAD 15)
+
+The sections below enumerate the 44 Revit tools. The companion AutoCAD server
+registers 15 tools, summarized after the Revit inventory and documented in
+[`autocad/CLAUDE.md`](autocad/CLAUDE.md).
 
 ### Session (3)
 - `revit_list_sessions` — Discover live local Revit processes and their active documents.
@@ -352,29 +364,58 @@ on Revit's main thread immediately before dispatch. Switching the active documen
 requires a fresh `revit_set_target`. A normally launched first Revit uses 8181 and
 additional processes auto-bind to 8183–8199; 8182 remains reserved for AutoCAD.
 
+### Coordination (1)
+- `revit_work_scope` — Host-owned exclusive reservations with status/acquire/renew/release/disable.
+  **Capability-gated, not a blanket requirement for every running plugin.**
+  A tool listed by TypeScript is not proof that the loaded Revit host supports it.
+  Check live `revit_ping`/`revit_work_scope op=status`; a missing ping capability
+  field is unknown until checked. An exact `Unknown command: 'work_scope'`
+  response (or normalized `supported=false`) establishes unsupported status.
+  On that host, continue already-authorized work using the existing workflow:
+  one model writer, pinned document/session, fresh reads, retry keys and post-write
+  verification. **Do not request exception approval solely because reservations
+  are unavailable.** Existing approved parameters, criteria and scope remain valid;
+  do not claim reservation protection. Supported but disabled coordination also
+  allows existing single-writer work; acquiring opts into coordination.
+  When coordination is enabled, acquire before reading data used to calculate
+  edits. Element scopes permit only built-in instance Comments/Mark writes;
+  other side effects require document scope. Conflict, stale/expired tokens,
+  target mismatch, connection errors and missing registries are NOT evidence of
+  unsupported functionality; never bypass those errors or auto-disable protection.
+  Release/expiry does not disable coordination. Separate MCP processes own tokens.
+  See `docs/WORK_SCOPE_COORDINATION.md`; installation needs host restart, but
+  installing this optional feature is not a prerequisite for authorized legacy work.
+
 ### Utility (4)
 - `revit_ping` — Connection health check
 - `revit_get_project_info` — Project metadata
 - `revit_get_commandset_status` — Active/staged CommandSet generation status
 - `revit_reload_commandset` — Pre-validated Revit 2025+ CommandSet hot swap
 
-### Query (10)
+### Query (12)
 - `revit_get_levels`, `revit_get_views`, `revit_get_grids` — Project structure
 - `revit_query_elements` — Element search with filters + pagination.
   - `match_mode`: `exact` (기본, 대소문자 무시) | `contains` | `empty` (파라미터 존재하나 값 없음).
     ⚠️ 과거 기본이 contains여서 "50A" 검색에 "250A"가 걸리는 사고가 있었음 — 현재는 exact 기본.
   - `ids_only`: ID 배열만 반환 (페이지 기본 5000, 최대 10000) — 후속 batch 작업용.
   - `group_by_parameter`: summary 모드에서 파라미터 값별 개수 분포 반환.
+  - `include_links=true`: 로드된 Revit 링크 문서까지 조회하며 상세/ID 레코드에 `link_id`, `link_name` 반환.
+  - `workset_filter`: 호스트 요소의 작업세트 이름을 대소문자 무시 exact 매칭 (링크 문서에는 미적용).
   - 페이지네이션: `has_more`일 때 `next_cursor` 발급. 평문 정수 cursor("200")도 수용.
+- `revit_get_linked_models` — RevitLinkInstance별 링크 타입/인스턴스 ID, 경로, 로드 상태, 작업세트 조회 (read-only).
+- `revit_get_sheets` — Existing ViewSheet number/name/ID and standard viewport/view IDs (read-only; empty success).
 - `revit_get_element_info` — Single element detail
 - `revit_get_element_geometry` — Bounding box / face / edge / solid primitives
 - `revit_get_selected_elements` — Current Revit UI selection
 - `revit_get_types_by_category`, `revit_get_family_types` — Type catalog
 - `revit_get_all_categories` — Available categories
 
-### Create (3)
+### Create (4)
 - `revit_create_wall` — Straight wall between two points
 - `revit_create_floor` — Floor from rectangle or polygon
+- `revit_place_family` — Place 1-50 already-loaded, unhosted OneLevelBased family symbols in one transaction.
+  Resolve by FamilySymbol `type_id` or case-insensitive exact `family_name` + `type_name`; points are
+  `[x,y,z]` in Revit internal feet or `input_unit="mm"`. Per-item failures, idempotency key, and first-instance verification.
 - `revit_create_pipe_run` — 측량좌표(또는 internal) 점 배열로 연속 배관 + 정점 엘보 자동 생성.
   **프로젝트 이식성**: `coordinate_mode="survey"`(기본)면 런타임에 `ActiveProjectLocation`을
   읽어 측량→내부 변환 — 좌표 하드코딩 없음. 회전 부호는 테스트점 왕복으로 자가 판별,
@@ -383,7 +424,7 @@ additional processes auto-bind to 8183–8199; 8182 remains reserved for AutoCAD
   `connect_elbows`(기본 true). post-tx: 첫 점 survey 왕복 검증(`verification.match`, 1cm 허용).
   execute_script CAD→Revit 워크플로의 1층 도구 승격 (AI-First 원칙 §7).
 
-### Modify (8)
+### Modify (9)
 - `revit_modify_element_parameter` — Set parameter value (1건)
 - `revit_batch_modify_parameters` — N건을 **단일 트랜잭션**으로 일괄 설정.
   입력 A: `modifications` 배열 (요소별 다른 값) / 입력 B: `element_ids` + `parameters` 맵 (균일 스탬핑).
@@ -395,22 +436,29 @@ additional processes auto-bind to 8183–8199; 8182 remains reserved for AutoCAD
 - `revit_duplicate_type` — ElementType 복제 (CAD 일람표 reconciliation용)
 - `revit_rename_type` — ElementType 이름 변경
 - `revit_change_instance_type` — 인스턴스 타입 재배정 (max 1000, workshared는 batch 10 권장)
+- `revit_modify_wall_height_to_linked_soffit` — Up to 50 host walls measured against loaded linked floors.
+  `link_name_contains` is case-insensitive contains; `dry_run=true` is the safe default and must be set false explicitly to write.
 
-### View (5)
+### View (6)
 - `revit_set_active_view` — Switch view (partial name match)
 - `revit_isolate_elements` — Isolate or hide in view
 - `revit_reset_view_isolation` — Reset temporary isolation
-- `revit_select_elements` — UI selection/highlight
+- `revit_select_elements` — UI selection/highlight; `zoom=true` also calls UIDocument.ShowElements (default false)
 - `revit_duplicate_views` — N개 뷰를 **단일 트랜잭션**으로 복제. `option`: `duplicate`(기본) /
   `with_detailing`(상세 복제) / `as_dependent`(의존적 복제). `as_dependent`는 평면/천장/단면/입면/
   면적평면만 가능(3D·드래프팅·범례·일람표·시트 불가) — `CanViewBeDuplicated` 사전 체크로 미지원 뷰는
   reason과 함께 skip(무성 드롭 없음). `view_ids`/`view_names`(exact→contains, 템플릿 제외) 배치 입력,
   `name_suffix`(충돌 시 자동 증분), `activate`(첫 새 뷰로 전환), `idempotency_key` 지원.
+- `revit_place_views_on_sheet` — Place 1-50 existing non-template, non-schedule views on one existing sheet.
+  Viewport centers accept sheet-space feet or millimetres; single transaction, per-item failures, idempotency key,
+  and first-viewport verification. The tool never creates sheets.
 
-### Export (1)
+### Export (2)
 - `revit_export_schedule` — ViewSchedule (일람표) → JSON and/or CSV (UTF-8 BOM by
   default for Excel/Korean compatibility). Post-export verification (file size,
   line count). Resolution by `schedule_id` or `schedule_name` (exact → contains).
+- `revit_export_view` — 활성 뷰 또는 `view_id`/`view_name`으로 지정한 비템플릿 뷰를 PNG/JPG로 내보냄.
+  기본 경로 `%TEMP%\revit-mcp-exports`, `overwrite=false`, `idempotency_key` 및 파일 존재/크기 검증 지원.
 
 ### Visualize / Review (2)
 - `revit_apply_color_filter` — View-specific graphic override (line + surface fill
@@ -440,6 +488,18 @@ Shared selector helper: `commandset/Helpers/ElementSelector.cs`.
   - modify 모드는 실행 전 사용자에게 변경 내용 요약을 보여줄 것 (도구 description에 명시).
   - 자주 반복되는 스크립트 패턴은 1층 정식 도구로 승격한다.
 
+### AutoCAD (15)
+
+- Utility (1): `cad_ping`
+- Query (8): `cad_get_drawing_info`, `cad_get_layers`, `cad_query_entities`,
+  `cad_extract_table`, `cad_get_selected_entities`, `cad_get_selection_texts`,
+  `cad_get_selection_dimensions`, `cad_parse_grid_schedule`
+- Create (2): `cad_create_line`, `cad_create_entities`
+- Modify (1): `cad_modify_entities`
+- Blocks (1): `cad_blocks`
+- Export (1): `cad_plot_pdf`
+- Script (1): `cad_execute_script`
+
 ## Tested Models
 
 ### 대형 프로젝트 (Sprint 2 검증)
@@ -464,7 +524,12 @@ but provide critical recovery signals on failure.
 - **Where**: `_idempotencyCache` dictionary in `RevitWebSocketServer`.
 - **Keyed by**: caller-supplied `idempotency_key` param, falling back to `request.Id` (UUID).
 - **TTL**: 15 minutes. Opportunistic pruning every 50 writes.
-- **Scoped to side-effect commands only**: `create_*`, `modify_*`, `delete_*`, `move_*`, `copy_*`, `mirror_*`, `rotate_*`, `array_*`, `rename_*`, `place_*`, `load_*`, `purge_*`, `set_*`, `batch_create_*`, `fix_*`. Read-only queries are never cached.
+- **Scoped to side-effect commands only**: exact commands `execute_script` and
+  `reload_commandset`, plus prefixes `create_*`, `modify_*`, `delete_*`,
+  `move_*`, `copy_*`, `mirror_*`, `rotate_*`, `array_*`, `rename_*`,
+  `duplicate_*`, `change_*`, `place_*`, `load_*`, `purge_*`, `set_*`,
+  `batch_*`, `fix_*`, `apply_*`, `tag_*`, `isolate_*`, `reset_*`,
+  `select_*`, and `export_*`. All other commands are uncached.
 - **What it prevents**: duplicate element creation when a WebSocket response is lost mid-flight and the client retries. The second call returns the cached result verbatim — same `id` field, no Revit API call.
 
 ### 2. Post-transaction verification (Create/Modify commands)

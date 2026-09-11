@@ -43,28 +43,11 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.CSharp.Scripting;
 using Microsoft.CodeAnalysis.Scripting;
+using RevitMCP.CommandSet.Helpers;
 using RevitMCP.CommandSet.Interfaces;
 
 namespace RevitMCP.CommandSet.Commands.Script
 {
-    /// <summary>
-    /// Globals injected into every script. Must be public for Roslyn access.
-    /// </summary>
-    public class ScriptGlobals
-    {
-        /// <summary>The active Revit document.</summary>
-        public Document doc;
-
-        /// <summary>Append a line to the prints[] array in the response.</summary>
-        public Action<object> print;
-
-        /// <summary>Convert millimeters to Revit internal feet.</summary>
-        public double MmToFt(double mm) => mm / 304.8;
-
-        /// <summary>Convert Revit internal feet to millimeters.</summary>
-        public double FtToMm(double ft) => ft * 304.8;
-    }
-
     /// <summary>
     /// Execute an arbitrary C# script against the live Revit document.
     /// This is the "escape hatch" tool: requests with no dedicated tool are
@@ -108,6 +91,7 @@ namespace RevitMCP.CommandSet.Commands.Script
             "System.Diagnostics.Process",
             "Process.Start",
             "Environment.Exit",
+            "SetEnvironmentVariable", // approval preferences must be set outside scripts
             "System.Reflection",
             "Assembly.Load",
             "AppDomain",
@@ -183,19 +167,7 @@ namespace RevitMCP.CommandSet.Commands.Script
                 cancellationToken.ThrowIfCancellationRequested();
 
                 // ─── Compile ───
-                var options = ScriptOptions.Default
-                    .WithReferences(
-                        typeof(object).Assembly,            // System.Private.CoreLib
-                        typeof(Enumerable).Assembly,        // System.Linq
-                        typeof(Document).Assembly,          // RevitAPI
-                        Assembly.GetExecutingAssembly())    // ScriptGlobals
-                    .WithImports(
-                        "System",
-                        "System.Collections.Generic",
-                        "System.Linq",
-                        "Autodesk.Revit.DB");
-
-                var script = CSharpScript.Create(code, options, typeof(ScriptGlobals));
+                var script = ScriptGlobalsBridge.Create<Document>(code);
                 var diagnostics = script.Compile(cancellationToken);
                 var compileErrors = diagnostics
                     .Where(d => d.Severity == DiagnosticSeverity.Error)
@@ -214,26 +186,48 @@ namespace RevitMCP.CommandSet.Commands.Script
                         "Remember: imports already include System / System.Collections.Generic / " +
                         "System.Linq / Autodesk.Revit.DB; globals are doc, print(), MmToFt(), FtToMm()."));
 
-                if (!ConfirmScript(code, mode))
+                ScriptApprovalDecision approval;
+                try
+                {
+                    approval = ScriptApprovalPolicy.Decide(
+                        Environment.GetEnvironmentVariable(
+                            ScriptApprovalPolicy.SettingName,
+                            EnvironmentVariableTarget.User),
+                        () => ConfirmScript(code, mode).ToString());
+                }
+                catch (ArgumentException ex)
                 {
                     return Task.FromResult(CommandResult.Fail(
-                        $"The user declined the {mode} script in Revit.",
+                        $"Invalid script approval setting: {ex.Message}",
+                        "Set the Windows User environment variable " +
+                        "REVIT_MCP_SCRIPT_APPROVAL to 'prompt' or 'auto', " +
+                        "or remove it to restore per-script approval."));
+                }
+
+                if (!approval.Approved)
+                {
+                    return Task.FromResult(CommandResult.Fail(
+                        approval.DialogResult == "No"
+                            ? $"The {mode} script was declined in Revit (dialog result: No)."
+                            : $"The {mode} script approval was cancelled or closed " +
+                              $"(dialog result: {approval.DialogResult ?? "unknown"}).",
                         "The script was not executed. Review the code and its " +
                         "possible side effects with the user before retrying."));
                 }
 
+                // Approval may outlive the request deadline. Never start a
+                // transaction or script for a request that already expired.
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // ─── Run ───
                 var prints = new List<string>();
                 var printsTruncated = false;
-                var globals = new ScriptGlobals
-                {
-                    doc = doc,
-                    print = o =>
+                var globals = ScriptGlobalsBridge.Globals(doc,
+                    o =>
                     {
                         if (prints.Count < MaxPrints) prints.Add(o?.ToString() ?? "null");
                         else printsTruncated = true;
-                    }
-                };
+                    });
 
                 object returnValue;
                 TransactionStatus? transactionStatus = null;
@@ -294,6 +288,7 @@ namespace RevitMCP.CommandSet.Commands.Script
                 var data = new Dictionary<string, object>
                 {
                     ["mode"] = mode,
+                    ["approval"] = approval.ToData(),
                     ["execution_ms"] = sw.ElapsedMilliseconds,
                     ["transaction"] = mode == "modify" ? "committed" : "none (query mode)",
                     ["mutation_committed"] = mode == "modify",
@@ -407,7 +402,7 @@ namespace RevitMCP.CommandSet.Commands.Script
                        StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool ConfirmScript(string code, string mode)
+        private static TaskDialogResult ConfirmScript(string code, string mode)
         {
             const int maxPreviewCharacters = 1400;
             const int maxPreviewLines = 24;
@@ -447,7 +442,7 @@ namespace RevitMCP.CommandSet.Commands.Script
                 AllowCancellation = true
             };
 
-            return dialog.Show() == TaskDialogResult.Yes;
+            return dialog.Show();
         }
 
         private static string FormatRuntimeError(Exception ex, List<string> prints)

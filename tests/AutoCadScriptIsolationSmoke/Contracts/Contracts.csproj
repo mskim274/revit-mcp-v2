@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>AutoCADMCP.CommandSet</AssemblyName>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../autocad/commandset/Interfaces/ICadCommand.cs" Link="ICadCommand.cs" />
+    <Compile Include="../../../autocad/commandset/Commands/ExecuteScriptCommand.cs" Link="ExecuteScriptCommand.cs" />
+    <Compile Include="../../../autocad/commandset/Helpers/ScriptEngineLoadContext.cs" Link="ScriptEngineLoadContext.cs" />
+  </ItemGroup>
+</Project>

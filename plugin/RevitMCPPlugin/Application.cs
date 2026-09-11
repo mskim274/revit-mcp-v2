@@ -104,6 +104,7 @@ namespace RevitMCP.Plugin
                 application.ControlledApplication.DocumentOpened += OnDocumentOpened;
                 application.ControlledApplication.DocumentCreated += OnDocumentCreated;
                 application.ControlledApplication.DocumentClosing += OnDocumentClosing;
+                application.ControlledApplication.DocumentChanged += OnWorkScopeDocumentChanged;
                 application.Idling += OnIdlingEnsureServer;
                 application.Idling += OnIdlingUpdateRegistrySnapshot;
 
@@ -170,6 +171,7 @@ namespace RevitMCP.Plugin
             application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
             application.ControlledApplication.DocumentCreated -= OnDocumentCreated;
             application.ControlledApplication.DocumentClosing -= OnDocumentClosing;
+            application.ControlledApplication.DocumentChanged -= OnWorkScopeDocumentChanged;
             application.Idling -= OnIdlingEnsureServer;
             application.Idling -= OnIdlingUpdateRegistrySnapshot;
             application.Idling -= OnIdlingShowUpdateDialog;
@@ -282,6 +284,11 @@ namespace RevitMCP.Plugin
         {
             // Only stop if this is the last document
             // (Revit may have multiple documents open)
+        }
+
+        private void OnWorkScopeDocumentChanged(object sender, Autodesk.Revit.DB.Events.DocumentChangedEventArgs e)
+        {
+            _wsServer?.NotifyWorkScopeChange(e);
         }
 
         private IEnumerable<int> GetCandidatePorts()

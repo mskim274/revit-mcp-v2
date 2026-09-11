@@ -5,6 +5,7 @@ import {
   type CommandResponse,
   type ErrorCode,
 } from "@kimminsub/mcp-cad-core";
+import { randomUUID } from "node:crypto";
 import { WS_URL, LOG_PREFIX, getRevitAuthHeaders } from "../constants.js";
 import {
   RevitSessionRegistry,
@@ -47,6 +48,9 @@ export class RevitWebSocketClient extends CadWebSocketClient {
   ) => CadWebSocketClient;
   private readonly managedClients = new Map<string, ManagedClient>();
   private selectedTarget: SelectedRevitTarget | null = null;
+  private readonly agentId = randomUUID().replaceAll("-", "");
+  private readonly workScopes = new Map<string, string>();
+  private routingQueue: Promise<void> = Promise.resolve();
 
   constructor(options: RevitWebSocketClientOptions = {}) {
     super({
@@ -89,6 +93,10 @@ export class RevitWebSocketClient extends CadWebSocketClient {
   }
 
   async selectTarget(sessionId: string): Promise<SelectedRevitTarget> {
+    return this.enqueueRoute(() => this.selectTargetNow(sessionId));
+  }
+
+  private async selectTargetNow(sessionId: string): Promise<SelectedRevitTarget> {
     const normalized = sessionId.trim();
     const discovery = await this.getLiveSessions();
     const session = discovery.sessions.find(
@@ -113,12 +121,12 @@ export class RevitWebSocketClient extends CadWebSocketClient {
     return { ...this.selectedTarget };
   }
 
-  clearTarget(): void {
-    this.selectedTarget = null;
-    for (const managed of this.managedClients.values()) {
-      managed.client.disconnect();
-    }
-    this.managedClients.clear();
+  async clearTarget(): Promise<void> {
+    return this.enqueueRoute(async () => {
+      this.selectedTarget = null;
+      for (const managed of this.managedClients.values()) managed.client.disconnect();
+      this.managedClients.clear();
+    });
   }
 
   override async connect(): Promise<void> {
@@ -145,6 +153,23 @@ export class RevitWebSocketClient extends CadWebSocketClient {
   }
 
   override async sendCommand(
+    command: string,
+    params: Record<string, unknown> = {},
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    options: CommandExecutionOptions = {},
+  ): Promise<CommandResponse> {
+    // Acquire -> write -> release must see the token produced by the preceding
+    // response even if a client submits MCP calls concurrently.
+    return this.enqueueRoute(() => this.routeCommand(command, params, timeoutMs, options));
+  }
+
+  private enqueueRoute<T>(action: () => Promise<T>): Promise<T> {
+    const result = this.routingQueue.then(action);
+    this.routingQueue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async routeCommand(
     command: string,
     params: Record<string, unknown> = {},
     timeoutMs: number = DEFAULT_TIMEOUT_MS,
@@ -226,6 +251,10 @@ export class RevitWebSocketClient extends CadWebSocketClient {
     }
 
     // Backward compatibility for plugins that predate the instance registry.
+    if (command === "work_scope") {
+      return commandError("TARGET_SELECTION_REQUIRED", "No live Revit session is available to verify work scope support.", true,
+        "Check revit_list_sessions and revit_ping. A missing registry or connection error does not prove that reservations are unsupported.");
+    }
     if (!super.isConnected) {
       try {
         await super.connect();
@@ -275,11 +304,61 @@ export class RevitWebSocketClient extends CadWebSocketClient {
         // The shared client produces the canonical connection error below.
       }
     }
-    return client.sendCommand(command, params, timeoutMs, {
+    const scopeKey = `${session.session_id}:${expectedDocumentFingerprint.toLowerCase()}`;
+    const response = await client.sendCommand(command, params, timeoutMs, {
       ...options,
       targetSessionId: session.session_id,
       expectedDocumentFingerprint,
+      agentId: this.agentId,
+      workScopeToken: this.workScopes.get(scopeKey),
     });
+    // A new tool catalog can be paired with an older running host. Only the
+    // host's exact unknown-command response establishes lack of support.
+    // Never downgrade transport/target/conflict errors or an existing token.
+    if (command === "work_scope" && response.status === "error" &&
+        response.error?.code === "VALIDATION_ERROR" &&
+        response.error.message === "Unknown command: 'work_scope'" &&
+        !this.workScopes.has(scopeKey) && params.lease_token === undefined) {
+      const suggestion = "For already-authorized work, continue with the existing tools using one model writer, " +
+        "the pinned target, fresh parameter reads, idempotency keys and post-write verification. " +
+        "Do not request extra approval solely because this optional host feature is unavailable; " +
+        "do not claim reservation or conflict protection.";
+      if (params.op === "status") return {
+        id: response.id,
+        status: "success",
+        data: {
+          supported: false,
+          coordination_enabled: false,
+          reservation_required: false,
+          reason: "host_command_unavailable",
+          suggestion,
+        },
+      };
+      return commandError("WORK_SCOPE_UNSUPPORTED",
+        "The running Revit host does not implement work_scope; no reservation operation was performed.",
+        false, suggestion);
+    }
+    if (command === "work_scope" && response.status === "success") {
+      if (params.op === "status" && isRecord(response.data) && typeof response.data.coordination_enabled === "boolean")
+        return { ...response, data: { ...response.data, supported: true,
+          reservation_required: response.data.coordination_enabled } };
+      const assignment = isRecord(response.data) ? response.data.assignment : null;
+      if ((params.op === "acquire" || params.op === "renew") && isRecord(assignment) &&
+          typeof assignment.lease_token === "string" && /^[a-f0-9]{32}$/.test(assignment.lease_token)) {
+        this.workScopes.set(scopeKey, assignment.lease_token);
+      } else if (params.op === "acquire" || params.op === "renew") {
+        return commandError("INTERNAL_ERROR", "The host reported success without a valid assignment token.", true,
+          "Inspect revit_work_scope status. Retry acquire with the same key, or renew your existing assignment with its explicit lease_token; do not assume it was released.");
+      } else if (params.op === "release" || params.op === "disable") {
+        // An explicit token can clean up an old assignment without detaching
+        // a different, currently active token.
+        if (params.lease_token === undefined || params.lease_token === this.workScopes.get(scopeKey))
+          this.workScopes.delete(scopeKey);
+      }
+    }
+    // Keep expired/stale tokens attached: silently dropping one would allow a
+    // delayed edit to fall back to legacy uncoordinated execution.
+    return response;
   }
 
   private async verifySessionIdentity(

@@ -10,6 +10,8 @@
  *   revit_get_family_types   — List loaded families and their types
  *   revit_get_types_by_category — List element types for a category
  *   revit_get_all_categories — List all populated categories in the model
+ *   revit_get_linked_models  — List linked Revit model instances and load state
+ *   revit_get_sheets         — List sheets and their viewport view IDs
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -65,7 +67,24 @@ const QUERY_ELEMENTS_INPUT_SCHEMA = z
       .trim()
       .min(1)
       .optional()
-      .describe("Filter by level name (exact match)"),
+      .describe(
+        "Filter host/link elements by level name (exact, case-insensitive). StructuralFraming commonly has LevelId=-1; use parameter_name/parameter_value for its reference-level parameter instead."
+      ),
+    workset_filter: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "Filter HOST elements by workset name (exact, case-insensitive). Linked-document elements are not filtered by this option."
+      ),
+    include_links: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Also query loaded Revit link documents; unloaded links are skipped. Default false."
+      ),
     type_filter: z
       .string()
       .trim()
@@ -190,7 +209,13 @@ export function registerQueryTools(
 **Detail mode (summary_only=false):** Returns paginated element details. When has_more=true, pass the returned next_cursor to fetch the next page.
 **ID mode (ids_only=true):** Returns only element IDs — up to 5000 per page (max 10000). Use this when you just need IDs for a follow-up operation.
 
+Set include_links=true to include elements from loaded Revit links. Linked detail/ID records include link_id and link_name; ID mode also keeps host_ids as a plain array for host-side batch tools. Unloaded links are skipped. workset_filter is an EXACT case-insensitive host-workset filter and does not filter linked documents.
+
 Parameter value matching is EXACT (case-insensitive) by default. Use match_mode="contains" for substring search, or match_mode="empty" to find elements whose parameter exists but has no value.
+
+StructuralFraming elements often have LevelId=-1. For beams, filter the reference-level/custom level parameter with parameter_name and parameter_value instead of level_filter.
+
+For rooms, use category="Rooms". For room-finish schedules, discover the ViewSchedule and use revit_export_schedule rather than attempting to create rooms.
 
 Common categories: Walls, Floors, Roofs, Doors, Windows, Columns, StructuralFraming (beams), StructuralColumns, Rooms, Furniture, Pipes, Ducts.
 
@@ -200,6 +225,8 @@ Examples:
   - Summary: query_elements(category="Walls") → "523 walls: 3 types across 5 levels"
   - Detail: query_elements(category="Walls", summary_only=false, limit=20) → first 20 walls
   - IDs: query_elements(category="Pipes", ids_only=true) → all pipe IDs in one call
+  - Links: query_elements(category="Walls", include_links=true) → host + loaded-link wall counts
+  - Workset: query_elements(category="Walls", workset_filter="Shared Levels and Grids") → exact host workset
   - Filter: query_elements(category="Pipes", parameter_name="Size Code", parameter_value="50A") → exact 50A only (not 250A)
   - Empty: query_elements(category="Pipes", parameter_name="Size Code", match_mode="empty") → pipes with Size Code unfilled
   - Distribution: query_elements(category="Pipes", group_by_parameter="Size Code") → count per Size Code value`,
@@ -214,6 +241,8 @@ Examples:
         limit: params.limit,
         cursor: params.cursor,
         level_filter: params.level_filter ?? null,
+        workset_filter: params.workset_filter ?? null,
+        include_links: params.include_links ?? false,
         type_filter: params.type_filter ?? null,
         parameter_name: params.parameter_name ?? null,
         parameter_value: params.parameter_value ?? null,
@@ -221,6 +250,33 @@ Examples:
         group_by_parameter: params.group_by_parameter ?? null,
       });
     }
+  );
+
+  // ─── revit_get_linked_models ───
+  server.registerTool(
+    "revit_get_linked_models",
+    {
+      title: "Get Linked Revit Models",
+      description: `List every RevitLinkInstance in the current host document.
+
+Returns link type ID, instance ID, instance/type names, resolved path when available, loaded/unloaded state, and host workset. An empty links array is a successful result with a suggestion. This tool is discovery-only and never loads, reloads, or unloads a link.`,
+      inputSchema: {},
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    async () => sendAndFormat(wsClient, "get_linked_models")
+  );
+
+  server.registerTool(
+    "revit_get_sheets",
+    {
+      title: "Get Revit Sheets",
+      description: `List every existing ViewSheet in the current document.
+
+Each row returns sheet number, name, ID, standard viewport IDs, and the view IDs referenced by those viewports. ScheduleSheetInstance placements are intentionally excluded from viewport_view_ids. An empty sheets array is a successful result.`,
+      inputSchema: {},
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    async () => sendAndFormat(wsClient, "get_sheets")
   );
 
   // ─── revit_get_element_info ───

@@ -5,6 +5,7 @@
  *   revit_create_wall      — Create a straight wall between two points
  *   revit_create_floor     — Create a floor from a rectangle or polygon
  *   revit_create_pipe_run  — Create a connected pipe run (survey coords) + elbows
+ *   revit_place_family     — Batch-place already-loaded family types
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -194,6 +195,75 @@ const PIPE_RUN_INPUT_SCHEMA = z
     }
   });
 
+const FAMILY_PLACEMENT_SCHEMA = z
+  .object({
+    type_id: elementIdSchema("Already-loaded FamilySymbol ElementId")
+      .optional(),
+    family_name: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("Family name; case-insensitive exact match only."),
+    type_name: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("Type name; case-insensitive exact match only."),
+    point: z
+      .tuple([FINITE_NUMBER, FINITE_NUMBER, FINITE_NUMBER])
+      .describe("Insertion point [x, y, z] in the top-level input_unit."),
+    level_id: elementIdSchema("Level ElementId").optional(),
+    level_name: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("Level name; case-insensitive exact match only."),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const hasTypeId = value.type_id !== undefined;
+    const hasFamily = value.family_name !== undefined;
+    const hasTypeName = value.type_name !== undefined;
+    if (hasTypeId && (hasFamily || hasTypeName)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Choose type_id OR family_name + type_name, not both.",
+      });
+    } else if (!hasTypeId && !(hasFamily && hasTypeName)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide type_id, or provide both family_name and type_name.",
+      });
+    }
+    if (value.level_id !== undefined && value.level_name !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Choose level_id or level_name, not both.",
+      });
+    }
+  });
+
+const PLACE_FAMILY_INPUT_SCHEMA = z
+  .object({
+    placements: z
+      .array(FAMILY_PLACEMENT_SCHEMA)
+      .min(1)
+      .max(50)
+      .describe("One to 50 family placement requests, processed in array order."),
+    input_unit: z
+      .enum(["feet", "mm"])
+      .optional()
+      .default("feet")
+      .describe(
+        'Coordinate unit for every point: "feet" means Revit internal project coordinates; "mm" converts each coordinate from millimetres.'
+      ),
+    idempotency_key: idempotencyKeySchema(),
+  })
+  .strict();
+
 export function registerCreateTools(
   server: McpServer,
   wsClient: RevitWebSocketClient
@@ -261,6 +331,35 @@ Example: Create a 20ft wall on Level 1:
         idempotency_key: params.idempotency_key,
       });
     }
+  );
+
+  server.registerTool(
+    "revit_place_family",
+    {
+      title: "Place Loaded Family Instances (batch)",
+      description: `Place 1-50 instances of already-loaded family types in one Revit transaction.
+
+Each placement identifies a FamilySymbol by type_id OR by family_name + type_name; names use case-insensitive EXACT matching and ambiguous matches fail. This tool does not load families. Use revit_get_family_types(include_types=true) to discover loaded type IDs.
+
+Points are [x,y,z]. input_unit="feet" (default) means Revit internal project coordinates; input_unit="mm" converts all three values from millimetres. A supplied level_id or level_name is resolved exactly; when omitted, the closest level by elevation to point Z is used.
+
+Only unhosted OneLevelBased family symbols are supported. Hosted, face-based, work-plane-based, curve-based, adaptive, annotation, and other placement modes fail per item with a reason. Successful items commit together, failed items are reported individually, and verification reopens the first placed instance after commit.
+
+Pass idempotency_key and reuse it only for an identical retry after an uncertain timeout.`,
+      inputSchema: PLACE_FAMILY_INPUT_SCHEMA,
+      annotations: CREATE_ANNOTATIONS,
+    },
+    async (params) =>
+      sendAndFormat(
+        wsClient,
+        "place_family",
+        {
+          placements: params.placements,
+          input_unit: params.input_unit ?? "feet",
+          idempotency_key: params.idempotency_key,
+        },
+        BATCH_TIMEOUT_MS
+      )
   );
 
   // ─── revit_create_floor ───

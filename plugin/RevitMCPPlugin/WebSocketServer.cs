@@ -48,6 +48,8 @@ namespace RevitMCP.Plugin
         private readonly HashSet<WebSocket> _connections = new HashSet<WebSocket>();
         private readonly HashSet<Task> _connectionTasks = new HashSet<Task>();
         private readonly SemaphoreSlim _sideEffectGate = new SemaphoreSlim(1, 1);
+        private readonly Services.WorkScopeGuard _workScopes = new Services.WorkScopeGuard();
+        private string _workScopeTrackingError;
         private readonly Dictionary<string, CachedResult> _idempotencyCache =
             new Dictionary<string, CachedResult>();
         private readonly Dictionary<string, IdempotencyBinding> _idempotencyBindings =
@@ -146,6 +148,24 @@ namespace RevitMCP.Plugin
 
         public int Port => _port;
         public string SessionId => _sessionId;
+
+        // Called only by Revit's DocumentChanged event on its main thread.
+        internal void NotifyWorkScopeChange(Autodesk.Revit.DB.Events.DocumentChangedEventArgs e)
+        {
+            try
+            {
+                var documentKey = e.GetDocument().GetHashCode().ToString(CultureInfo.InvariantCulture);
+                _workScopes.Registry.Changed(documentKey,
+                    e.GetAddedElementIds().Concat(e.GetModifiedElementIds()).Concat(e.GetDeletedElementIds())
+                        .Select(id => id.GetValue()));
+            }
+            catch (Exception ex)
+            {
+                // Losing change evidence must not turn into permission to edit.
+                _workScopeTrackingError = ex.Message;
+                System.Diagnostics.Debug.WriteLine($"[RevitMCP] Work scope change tracking failed: {ex.Message}");
+            }
+        }
 
         /// <summary>
         /// Starts listening. Returns false when the listener could not be started,
@@ -563,17 +583,20 @@ namespace RevitMCP.Plugin
                     "from the same current session record.");
             }
 
-            if (!dispatcher.HasCommand(request.Command))
+            var scopeCommand = request.Command == "work_scope";
+            if (!scopeCommand && !dispatcher.HasCommand(request.Command))
             {
                 return BuildErrorResponse(
                     request.Id,
                     "VALIDATION_ERROR",
                     $"Unknown command: '{request.Command}'",
                     true,
-                    $"Available commands: {string.Join(", ", dispatcher.GetCommandNames())}");
+                    $"Available commands: {string.Join(", ", dispatcher.GetCommandNames().Concat(new[] { "work_scope" }))}");
             }
 
-            var sideEffect = IsSideEffectRequest(request);
+            // Unknown future commands default to exclusive scope, never bypass
+            // the gate simply because their name has a new verb prefix.
+            var sideEffect = IsSideEffectRequest(request) || !Services.WorkScopeGuard.IsReadOnly(request.Command);
             if (!TryResolveIdempotencyKey(
                     request,
                     out var requestKey,
@@ -588,7 +611,22 @@ namespace RevitMCP.Plugin
                     "or omit idempotency_key to use the request id.");
             }
 
-            var parametersHash = ComputeCanonicalParametersHash(request.Params);
+            if (request.AgentId != null && !Guid.TryParseExact(request.AgentId, "N", out _))
+                return BuildErrorResponse(request.Id, "VALIDATION_ERROR", "Invalid agent_id.", true,
+                    "Use a per-MCP-process 32-character UUID.");
+            if (request.WorkScopeToken != null && !Guid.TryParseExact(request.WorkScopeToken, "N", out _))
+                return BuildErrorResponse(request.Id, "VALIDATION_ERROR", "Invalid work_scope_token.", true,
+                    "Acquire a work scope and use the returned token.");
+            if (scopeCommand && (request.AgentId == null || request.TargetSessionId == null))
+                return BuildErrorResponse(request.Id, "WORK_SCOPE_REQUIRED", "Work scopes require guarded session routing and an agent identity.", true,
+                    "Use the updated MCP server, list sessions, and select the intended Revit target.");
+            // Each MCP process has its own retry namespace. Tokens are part of
+            // the request binding, so a new assignment cannot reuse old edits.
+            if (request.AgentId != null) requestKey = request.AgentId + ":" + requestKey;
+            var parametersHash = ComputeCanonicalParametersHash(new Dictionary<string, object>
+            {
+                ["parameters"] = request.Params, ["work_scope_token"] = request.WorkScopeToken
+            });
             var gateEntered = false;
 
             try
@@ -605,8 +643,11 @@ namespace RevitMCP.Plugin
                     gateEntered = true;
                 }
 
-                return await RevitTask.RunAsync(() =>
+                var outcome = await RevitTask.RunAsync(() => Services.ExternalEventTaskBoundary.Capture(() =>
                 {
+                    // A request can expire while waiting for Revit's UI event.
+                    // Do not invoke its command later after the user resumes work.
+                    linkedCts.Token.ThrowIfCancellationRequested();
                     var uiDocument = _uiApp.ActiveUIDocument;
                     var doc = uiDocument?.Document;
                     var documentFingerprint =
@@ -659,6 +700,19 @@ namespace RevitMCP.Plugin
                     }
 
                     var documentScope = ComputeDocumentScope(doc);
+                    // Unlike routing fingerprints, reservation state survives
+                    // Save As/title changes of the same open native document.
+                    var workDocumentScope = doc.GetHashCode().ToString(CultureInfo.InvariantCulture);
+                    if (sideEffect && _workScopeTrackingError != null)
+                        throw new Services.WorkScopeException("WORK_SCOPE_TRACKING_FAILED", "Model change tracking failed: " + _workScopeTrackingError,
+                            "Preserve work and restart this Revit process before further writes.");
+                    if (scopeCommand)
+                    {
+                        linkedCts.Token.ThrowIfCancellationRequested();
+                        var scopeData = _workScopes.Execute(doc, workDocumentScope, request.AgentId,
+                            request.WorkScopeToken, request.Params, linkedCts.Token);
+                        return Task.FromResult(BuildSuccessResponse(request.Id, JsonSerializer.Serialize(scopeData)));
+                    }
                     if (sideEffect)
                     {
                         var lookup = TryGetCachedResult(
@@ -687,6 +741,10 @@ namespace RevitMCP.Plugin
                         }
                     }
 
+                    // Validate after waiting for the write gate and immediately
+                    // before dispatch. Cached replies above never execute edits.
+                    var workLease = _workScopes.Check(doc, workDocumentScope, request.AgentId,
+                        request.WorkScopeToken, request.Command, request.Params, linkedCts.Token);
                     var command = dispatcher.GetCommand(request.Command);
                     var nativeParams = ConvertJsonElements(request.Params);
 
@@ -777,6 +835,7 @@ namespace RevitMCP.Plugin
                                 "idempotency key; apply the UI action separately.";
                         }
                     }
+                    _workScopes.Registry.CompleteWrite(workLease);
                     var serializedData = JsonSerializer.Serialize(
                         commandResult.Data,
                         CommandDataJsonOptions);
@@ -794,7 +853,14 @@ namespace RevitMCP.Plugin
                     return Task.FromResult(BuildSuccessResponse(
                         request.Id,
                         serializedData));
-                }).ConfigureAwait(false);
+                })).ConfigureAwait(false);
+                // Unwrap outside Revit.Async 2.1.1's faulted-task forwarding path.
+                // The existing error response/finally block now releases the gate.
+                return outcome.GetResult();
+            }
+            catch (Services.WorkScopeException ex)
+            {
+                return BuildErrorResponse(request.Id, ex.Code, ex.Message, true, ex.Suggestion);
             }
             catch (OperationCanceledException)
             {
@@ -802,14 +868,21 @@ namespace RevitMCP.Plugin
                     request.Id,
                     serverToken.IsCancellationRequested
                         ? "SERVER_SHUTDOWN"
-                        : "TIMEOUT_ERROR",
+                        : sideEffect && !gateEntered ? "WRITE_QUEUE_TIMEOUT" : "TIMEOUT_ERROR",
                     serverToken.IsCancellationRequested
                         ? "The Revit MCP server is shutting down."
-                        : $"Command '{request.Command}' timed out after {request.TimeoutMs}ms.",
+                        : sideEffect && !gateEntered
+                            ? $"Command '{request.Command}' never started: another serialized request " +
+                              $"held the write gate for the {request.TimeoutMs}ms wait limit."
+                            : $"Command '{request.Command}' timed out after {request.TimeoutMs}ms.",
                     true,
                     serverToken.IsCancellationRequested
                         ? "Reconnect after the Revit plugin restarts."
-                        : "Reduce the request scope or increase timeout_ms.");
+                        : sideEffect && !gateEntered
+                            ? "Do not resubmit model edits. Check the preceding script/command and any " +
+                              "Revit dialog. If it cannot finish, preserve your work and restart Revit. " +
+                              "Increasing the batch timeout will not clear a stuck request."
+                            : "Check Revit's active command/dialog and re-query affected elements before retrying.");
             }
             catch (Exception ex)
             {
@@ -881,6 +954,15 @@ namespace RevitMCP.Plugin
                 {
                     throw new InvalidOperationException(
                         "Revit selection did not match the requested element IDs.");
+                }
+                var zoom = data.TryGetValue("zoom", out var zoomValue) &&
+                           zoomValue is bool zoomRequested &&
+                           zoomRequested;
+                if (zoom)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    uiDocument.ShowElements(selectionIds);
+                    data["zoomed"] = true;
                 }
                 return;
             }
@@ -1005,6 +1087,9 @@ namespace RevitMCP.Plugin
             data["document_fingerprint"] = documentFingerprint ?? "";
             data["document_title"] = document?.Title ?? "";
             data["document_path"] = document?.PathName ?? "";
+            data["work_scope_supported"] = true;
+            data["work_scope_coordination_enabled"] = document != null &&
+                _workScopes.Registry.IsEnabled(document.GetHashCode().ToString(CultureInfo.InvariantCulture));
         }
 
         private static bool HasCommittedMutation(object data)
@@ -1857,6 +1942,12 @@ namespace RevitMCP.Plugin
 
             [JsonPropertyName("expected_document_fingerprint")]
             public string ExpectedDocumentFingerprint { get; set; }
+
+            [JsonPropertyName("agent_id")]
+            public string AgentId { get; set; }
+
+            [JsonPropertyName("work_scope_token")]
+            public string WorkScopeToken { get; set; }
         }
     }
 }

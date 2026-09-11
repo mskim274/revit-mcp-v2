@@ -215,6 +215,10 @@ jobs:
             -c Release -f net8.0-windows --no-restore `
             -p:MinVerVersionOverride=$env:RELEASE_VERSION
 
+      - name: Run work scope policy tests
+        shell: pwsh
+        run: dotnet run --project tests/WorkScopeSmoke -c Release
+
       - name: Build and test updater
         shell: pwsh
         run: |

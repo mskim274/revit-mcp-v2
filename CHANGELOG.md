@@ -8,7 +8,33 @@ changes are still fair game.
 
 ## [Unreleased]
 
+### Fixed
+- Updated compatible transitive `fast-uri`, `hono`, and `qs` versions to
+  resolve the production dependency advisories detected by CI.
+- Isolated AutoCAD script compiler dependencies from AutoCAD's older Roslyn
+  assemblies. A Roslyn-free command boundary checks opt-in before loading;
+  generated scripts share the exact API/globals assemblies. Deploy the new
+  `script-engine` folder with the matching Host/CommandSet and restart AutoCAD.
+- Fixed AutoCAD host transaction cleanup accessing a disposed native transaction
+  after command/cancellation/serialization exceptions. One transaction boundary
+  preserves commit state, never retries cleanup, and logs original exceptions
+  before disposal. Added 16 host-independent lifecycle regression scenarios.
+  Requires AutoCAD restart; Revit is unaffected.
+
 ### Added
+- Clarified reservation compatibility for older running Revit hosts. Work-scope
+  status now reports confirmed unsupported functionality explicitly; approved
+  legacy work does not need a reservation exception. Real coordination, target
+  and transport failures remain errors and never trigger a silent downgrade.
+- Added explicit Windows User `REVIT_MCP_SCRIPT_APPROVAL=auto/prompt` for
+  Revit query/modify scripts. Default remains per-script confirmation; user
+  changes apply on the next request without restart. Responses identify
+  automatic approval, and prompt cancellation is distinguished from No.
+- Added `revit_work_scope` for host-enforced multi-agent assignments, overlap
+  rejection, lease expiry and stale model evidence checks. Disjoint element
+  scopes permit built-in instance Comments/Mark edits; other side effects need
+  exclusive document scope. Reservations enable fail-closed coordination until
+  explicitly disabled by a document-scope holder. Requires host restart.
 - Added project MCP configs for Grok CLI / Orca (`.grok/config.toml`) and
   Claude Code / Codex (`.mcp.json`), both pointing `cad` and `revit` at the
   TypeScript stdio servers. Documented why `CadMCPServer.exe` must not be used
@@ -25,10 +51,37 @@ changes are still fair game.
 - Added process/session and active-document fingerprint guards to the
   WebSocket request envelope so a selected target fails closed if the Revit
   process or active document changes before execution.
-- Expanded the Revit MCP surface to 37 tools, including session targeting, exact-match and
+- Expanded the Revit MCP surface to 43 tools, including session targeting, exact-match and
   batch-query improvements, batch parameter modification, type management,
   schedule export, review overlays and tagging, survey-coordinate pipe runs,
-  live C# script execution, and batch view duplication.
+  live C# script execution, batch view duplication, linked-model discovery,
+  raster view export, loaded-family placement, sheet discovery, and batched
+  view placement on existing sheets.
+- Added read-only `revit_get_linked_models`, returning link instance/type IDs,
+  names, paths, load state, and host worksets without loading, reloading, or
+  unloading references. Added `revit_export_view` for verified PNG/JPG export
+  of one active or ID/name-targeted non-template view, with exact-first name matching,
+  `overwrite=false`, and idempotent retry support.
+- Added `revit_get_sheets`, returning sheet number/name/ID and viewport view
+  IDs, plus `revit_place_family` and `revit_place_views_on_sheet`. Both new
+  placement tools accept batches of up to 50, use one transaction with
+  per-item outcomes, support idempotent retries, and verify the first created
+  result after commit; family/type names resolve by case-insensitive exact match.
+- Registered `revit_modify_wall_height_to_linked_soffit` with
+  `dry_run=true` by default. It measures up to 50 host walls against floors in
+  loaded links and requires an explicit non-dry run before writing verified
+  unconnected heights.
+- Expanded the AutoCAD MCP surface to 15 tools. `cad_create_entities` creates
+  up to 200 line/polyline/circle/arc/text items in one transaction, and
+  `cad_modify_entities` moves, copies, erases, or rotates up to 500 handles in
+  one transaction; both return per-item outcomes and accept idempotency keys.
+- Added `cad_blocks`: list block names/reference counts or insert up to 50
+  exact-name references in one transaction with per-item outcomes,
+  idempotency, and verification. Added `cad_plot_pdf` for verified plotting of
+  the current or an exact-name layout, defaulting to
+  `%TEMP%\cad-mcp-exports` with `overwrite=false`.
+- Added `cad_execute_script` as the AutoCAD long-tail escape hatch and added
+  read-only xref metadata to `cad_get_drawing_info`.
 - Added PR CI for npm workspace builds, clean-consumer tarball tests,
   production dependency audit, both Revit target frameworks, updater smoke
   tests, and release-package validation.
@@ -73,6 +126,25 @@ changes are still fair game.
 - Tool schemas now enforce cross-field contracts, bounded batch sizes,
   64-bit-safe element identifiers, strict cursors, and stable
   `idempotency_key` forwarding.
+- `revit_query_elements` can now opt into loaded linked documents with
+  `include_links=true` (default remains false), identifies linked detail/ID
+  rows, and reports linked summary counts with the per-link list capped at 50
+  plus an explicit truncation flag. It also accepts a case-insensitive exact
+  `workset_filter` for host elements; Structural Framing still requires
+  parameter filtering when `LevelId` is unavailable.
+- `revit_get_project_info` now reports workset count and workset metadata only
+  when the document is workshared.
+- `revit_select_elements` now accepts `zoom=true` to zoom the active view to
+  the new selection; the default remains false.
+- Documented `Rooms` as the `revit_query_elements` category for room-finish
+  workflows, with `revit_export_schedule` as the path for existing room-finish
+  schedules.
+- `cad_query_entities` now accepts `space="current"` (default), `model`, or
+  `paper`; paper mode scans every paper-space layout. Documented
+  `AUTOCAD_MCP_PORT` for overriding the default AutoCAD bridge port.
+- Clarified that the current AutoCAD 2025 plugin targets .NET 8 and does not
+  claim AutoCAD 2027 support; Autodesk's 2027 managed API requires a separate
+  .NET 10 host build and SDK validation.
 
 ### Fixed
 - Stabilized multi-Revit active-document fingerprints by using Revit's
@@ -91,6 +163,10 @@ changes are still fair game.
 - `revit_execute_script` is disabled by default, requires explicit enablement
   and Revit UI approval for every run, and is documented as an escape hatch
   rather than a security sandbox.
+- `cad_execute_script` is independently disabled unless AutoCAD starts with
+  `AUTOCAD_MCP_ENABLE_SCRIPT=1`. Query mode aborts its transaction and modify
+  mode commits it; its denylist is not a sandbox and it has no UI approval
+  dialog.
 - Documented the local trust boundary, script-execution risk, confidential
   model-data handling, and manual release verification process.
 

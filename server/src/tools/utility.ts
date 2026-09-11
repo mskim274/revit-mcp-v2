@@ -20,6 +20,10 @@ export function registerUtilityTools(
       description: `Test the connection to Revit. Returns the Revit version, active document name, and connection status.
 
 Use this tool to verify that Revit is running and the MCP plugin is loaded before executing other commands.
+work_scope_supported=true advertises host reservation support; absence of that field
+is unknown, so check revit_work_scope op=status if available. supported=false there
+means already-authorized single-writer work may use existing tools without extra
+exception approval. Do not interpret connection or target errors as lack of support.
 
 Returns:
   - connected: boolean — whether the connection is active

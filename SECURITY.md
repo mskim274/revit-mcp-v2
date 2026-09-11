@@ -39,8 +39,16 @@ Revit MCP is a local automation bridge with powerful write access:
   the current Revit or AutoCAD user. Keep recoverable model backups and review
   requested mutations before approval.
 - `revit_execute_script` has a denylist designed to prevent common accidents;
-  it is not a security sandbox. It is disabled by default and every execution
-  requires approval in Revit. Only run code from a trusted, reviewed request.
+  it is not a security sandbox. It is disabled by default; enabled scripts
+  prompt in Revit unless the user explicitly opts into the Windows User
+  `REVIT_MCP_SCRIPT_APPROVAL=auto` preference. Auto applies to query and modify
+  in all updated sessions under that account and removes the per-script human
+  checkpoint. Use only trusted clients and reviewed requests. Set `prompt` to
+  restore dialogs for subsequent requests without restarting. See
+  [script approval](docs/SCRIPT_APPROVAL.md).
+- `cad_execute_script` is independently disabled unless AutoCAD starts with
+  `AUTOCAD_MCP_ENABLE_SCRIPT=1`. Its denylist is not a security sandbox, and
+  it has no per-execution UI approval dialog. Only run trusted, reviewed code.
 - Model names, parameter values, selected text, logs, exports, and response
   spill files may contain confidential project information. Do not attach
   them to public issues or commits without authorization.

@@ -84,7 +84,7 @@ namespace AutoCADMCP.Plugin
             "create_", "modify_", "delete_", "move_", "copy_", "mirror_",
             "rotate_", "array_", "rename_", "duplicate_", "change_", "place_", "load_", "purge_",
             "set_", "batch_", "fix_", "apply_", "tag_", "isolate_",
-            "reset_", "select_", "export_",
+            "reset_", "select_", "export_", "plot_",
         };
 
         public AcadWebSocketServer(int port = 8182)
@@ -574,7 +574,9 @@ namespace AutoCADMCP.Plugin
                         suggestion: "Use a compact UUID or similarly unique token.");
                 }
                 var parameterHash = ComputeParameterHash(parameters);
-                var isSideEffect = IsSideEffectCommand(commandName);
+                var isSideEffect = IsSideEffectCommand(
+                    commandName,
+                    parameters);
                 var commandGateAcquired = false;
                 using var executionCts =
                     CancellationTokenSource.CreateLinkedTokenSource(
@@ -648,6 +650,11 @@ namespace AutoCADMCP.Plugin
                     Exception captured = null;
                     object responseData = null;
                     var transactionCommitted = false;
+                    Exception transactionCleanupError = null;
+                    var dispatchTimer = Stopwatch.StartNew();
+                    void RecordError(string phase, Exception error) =>
+                        DiagnosticLog.Write(id, commandName, phase, timeoutMs,
+                            dispatchTimer.ElapsedMilliseconds, error);
 
                     // Pre-capture PICKFIRST before entering command context.
                     Autodesk.AutoCAD.DatabaseServices.ObjectId[] preSelection
@@ -680,12 +687,9 @@ namespace AutoCADMCP.Plugin
                         await acadDocs.ExecuteInCommandContextAsync(
                             async (object _) =>
                         {
-                            Transaction tr = null;
-                            try
-                            {
-                                using (tr = activeDoc.Database
-                                           .TransactionManager
-                                           .StartTransaction())
+                            var transactionOutcome = await TransactionBoundary.RunAsync(
+                                () => activeDoc.Database.TransactionManager.StartTransaction(),
+                                async tr =>
                                 {
                                     result = await command.ExecuteAsync(
                                         activeDoc.Database,
@@ -704,27 +708,32 @@ namespace AutoCADMCP.Plugin
                                                 result.Data);
                                         executionCts.Token
                                             .ThrowIfCancellationRequested();
-                                        tr.Commit();
-                                        transactionCommitted = true;
+                                        return result.CommitTransaction;
                                     }
-                                    else
-                                        tr.Abort();
-                                }
-                            }
-                            catch (Exception ex)
+                                    if (result != null)
+                                        RecordError("command_failed", new InvalidOperationException(
+                                            result.ErrorMessage ?? "Command returned failure."));
+                                    return false;
+                                },
+                                tr => tr.Commit(),
+                                tr => tr.Abort(),
+                                RecordError);
+                            transactionCommitted = transactionOutcome.Committed;
+                            captured = transactionOutcome.Error;
+                            transactionCleanupError = transactionOutcome.CleanupError;
+                            if (transactionCommitted && !transactionOutcome.DisposalSucceeded)
                             {
-                                captured = ex;
-                                if (!transactionCommitted)
-                                {
-                                    try { tr?.Abort(); }
-                                    catch { /* already rolled back/disposed */ }
-                                }
+                                // Committed writes must never be reported as rolled back.
+                                // Do not start another native transaction after failed cleanup.
+                                responseData = BuildPostCommitFallback(
+                                    responseData, commandName, isSideEffect,
+                                    transactionOutcome.CleanupError);
                             }
 
                             // The command transaction has been disposed here.
                             // Only now may final verification open a fresh
                             // read transaction against the committed ObjectId.
-                            if (transactionCommitted)
+                            if (transactionCommitted && transactionOutcome.DisposalSucceeded)
                             {
                                 try
                                 {
@@ -741,6 +750,7 @@ namespace AutoCADMCP.Plugin
                                 }
                                 catch (Exception verificationError)
                                 {
+                                    RecordError("post_commit_verification", verificationError);
                                     Debug.WriteLine(
                                         "[AutoCADMCP] Post-commit " +
                                         "verification warning: " +
@@ -757,6 +767,7 @@ namespace AutoCADMCP.Plugin
                     }
                     catch (Exception contextError)
                     {
+                        RecordError("command_context", contextError);
                         captured = contextError;
                     }
                     finally
@@ -791,6 +802,13 @@ namespace AutoCADMCP.Plugin
 
                     if (captured != null && !transactionCommitted)
                     {
+                        if (transactionCleanupError != null)
+                            return ErrorEnvelope(
+                                id, "TRANSACTION_CLEANUP_ERROR",
+                                $"{captured.Message} Cleanup also failed: {transactionCleanupError.Message}",
+                                recoverable: false,
+                                suggestion: "Rollback could not be confirmed. Do not retry automatically. " +
+                                    "Inspect the drawing and %LOCALAPPDATA%/AutoCADMCP/logs before restarting AutoCAD.");
                         if (captured is OperationCanceledException
                             && executionCts.IsCancellationRequested)
                         {
@@ -809,7 +827,8 @@ namespace AutoCADMCP.Plugin
                             captured.Message,
                             recoverable: true,
                             suggestion:
-                                "AutoCAD API call failed; see plugin logs.");
+                                "AutoCAD API call failed. Inspect %LOCALAPPDATA%/AutoCADMCP/logs " +
+                                "for the original exception before retrying. Do not blindly retry after a crash.");
                     }
                     if (captured != null)
                     {
@@ -896,7 +915,9 @@ namespace AutoCADMCP.Plugin
 
         // ─── Idempotency cache ─────────────────────────────────────────
 
-        private static bool IsSideEffectCommand(string commandName)
+        private static bool IsSideEffectCommand(
+            string commandName,
+            Dictionary<string, object> parameters)
         {
             if (string.Equals(
                     commandName,
@@ -906,6 +927,21 @@ namespace AutoCADMCP.Plugin
                 // An escape hatch is not a sandbox even when it is described
                 // as a query, so serialize and cache every invocation.
                 return true;
+            }
+
+            if (string.Equals(
+                    commandName,
+                    "blocks",
+                    StringComparison.Ordinal))
+            {
+                // The combined tool is read-only in list mode and mutating
+                // only in insert mode.
+                return parameters.TryGetValue("op", out var opValue) &&
+                       opValue is string op &&
+                       string.Equals(
+                           op,
+                           "insert",
+                           StringComparison.OrdinalIgnoreCase);
             }
 
             foreach (var prefix in _sideEffectPrefixes)
@@ -918,6 +954,14 @@ namespace AutoCADMCP.Plugin
             if (result.Data is Dictionary<string, object> data)
             {
                 data["mutation_committed"] = true;
+                if (data.TryGetValue("transaction", out var transaction) &&
+                    transaction is string transactionText &&
+                    transactionText.StartsWith(
+                        "pending dispatcher commit",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    data["transaction"] = "committed";
+                }
                 return;
             }
 
@@ -934,6 +978,36 @@ namespace AutoCADMCP.Plugin
             CommandResult result,
             Dictionary<string, object> parameters)
         {
+            if (string.Equals(
+                    commandName,
+                    "blocks",
+                    StringComparison.Ordinal))
+            {
+                FinalizeBlocksVerification(
+                    database,
+                    result,
+                    parameters);
+                return;
+            }
+
+            if (string.Equals(
+                    commandName,
+                    "create_entities",
+                    StringComparison.Ordinal))
+            {
+                FinalizeCreateEntitiesVerification(database, result);
+                return;
+            }
+
+            if (string.Equals(
+                    commandName,
+                    "modify_entities",
+                    StringComparison.Ordinal))
+            {
+                FinalizeModifyEntitiesVerification(database, result);
+                return;
+            }
+
             if (!string.Equals(
                     commandName,
                     "create_line",
@@ -1054,6 +1128,481 @@ namespace AutoCADMCP.Plugin
             };
         }
 
+        private static void FinalizeCreateEntitiesVerification(
+            Database database,
+            CommandResult result)
+        {
+            if (!(result.Data is Dictionary<string, object> data) ||
+                !TryReadNonNegativeInt(data, "created_count", out var createdCount) ||
+                !data.TryGetValue("created_handles", out var rawHandles) ||
+                !(rawHandles is List<string> createdHandles))
+            {
+                throw new InvalidDataException(
+                    "create_entities did not return its created count and handles.");
+            }
+
+            var existingCount = 0;
+            var sampleHandle = createdHandles.Count > 0
+                ? createdHandles[0]
+                : null;
+            var sampleExists = false;
+            string sampleType = null;
+            string sampleLayer = null;
+            using (var verificationTransaction = database
+                       .TransactionManager.StartOpenCloseTransaction())
+            {
+                foreach (var handleText in createdHandles)
+                {
+                    if (!TryResolveHandle(
+                            database,
+                            handleText,
+                            out var objectId))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var entity = verificationTransaction.GetObject(
+                            objectId,
+                            OpenMode.ForRead,
+                            false) as Entity;
+                        if (entity == null || entity.IsErased)
+                            continue;
+
+                        existingCount++;
+                        if (string.Equals(
+                                handleText,
+                                sampleHandle,
+                                StringComparison.Ordinal))
+                        {
+                            sampleExists = true;
+                            sampleType = entity.GetType().Name;
+                            sampleLayer = entity.Layer;
+                        }
+                    }
+                    catch
+                    {
+                        // Count only objects that can really be reopened
+                        // after commit; discrepancies are reported below.
+                    }
+                }
+                verificationTransaction.Commit();
+            }
+
+            var countMatches =
+                createdCount == createdHandles.Count &&
+                existingCount == createdCount;
+            var sampleMatches = createdCount == 0 || sampleExists;
+            var issues = new List<string>();
+            if (createdCount != createdHandles.Count)
+                issues.Add(
+                    "created_count does not match created_handles length.");
+            if (existingCount != createdCount)
+                issues.Add(
+                    $"Only {existingCount} of {createdCount} created handles could be reopened after commit.");
+            if (createdCount > 0 && !sampleExists)
+                issues.Add(
+                    "The first successful entity could not be reopened after commit.");
+
+            data["verification"] = new Dictionary<string, object>
+            {
+                ["performed"] = true,
+                ["phase"] = "post_commit",
+                ["provisional"] = false,
+                ["commit_verified"] = true,
+                ["match"] = countMatches && sampleMatches,
+                ["created_count"] = createdCount,
+                ["resolvable_created_count"] = existingCount,
+                ["count_match"] = countMatches,
+                ["sample_handle"] = sampleHandle,
+                ["sample_exists"] = createdCount == 0
+                    ? (bool?)null
+                    : sampleExists,
+                ["sample_type"] = sampleType,
+                ["sample_layer"] = sampleLayer,
+                ["issues"] = issues,
+            };
+        }
+
+        private static void FinalizeBlocksVerification(
+            Database database,
+            CommandResult result,
+            Dictionary<string, object> parameters)
+        {
+            var op = parameters.TryGetValue("op", out var opValue)
+                ? opValue as string
+                : "list";
+            if (!string.Equals(
+                    op,
+                    "insert",
+                    StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (!(result.Data is Dictionary<string, object> data) ||
+                !TryReadNonNegativeInt(
+                    data,
+                    "inserted_count",
+                    out var insertedCount) ||
+                !data.TryGetValue("inserted_handles", out var rawHandles) ||
+                !(rawHandles is List<string> insertedHandles))
+            {
+                throw new InvalidDataException(
+                    "blocks insert did not return its inserted count and handles.");
+            }
+
+            Dictionary<string, object> expected = null;
+            string sampleHandle = null;
+            if (insertedCount > 0)
+            {
+                if (!data.TryGetValue(
+                        "verification_sample",
+                        out var expectedValue) ||
+                    !(expectedValue is Dictionary<string, object> expectedData))
+                {
+                    throw new InvalidDataException(
+                        "blocks insert did not return sample verification metadata.");
+                }
+                expected = expectedData;
+                if (!expected.TryGetValue("handle", out var handleValue) ||
+                    !(handleValue is string expectedHandle) ||
+                    string.IsNullOrWhiteSpace(expectedHandle))
+                {
+                    throw new InvalidDataException(
+                        "blocks insert did not return its sample handle.");
+                }
+                sampleHandle = expectedHandle;
+            }
+
+            var existingCount = 0;
+            BlockReference sample = null;
+            Autodesk.AutoCAD.Geometry.Point3d actualPoint = default;
+            Autodesk.AutoCAD.Geometry.Scale3d actualScale = default;
+            double actualRotation = 0;
+            string actualBlockName = null;
+
+            using (var verificationTransaction = database
+                       .TransactionManager.StartOpenCloseTransaction())
+            {
+                foreach (var handleText in insertedHandles)
+                {
+                    if (!TryResolveHandle(
+                            database,
+                            handleText,
+                            out var objectId))
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        var reference = verificationTransaction.GetObject(
+                            objectId,
+                            OpenMode.ForRead,
+                            false) as BlockReference;
+                        if (reference == null || reference.IsErased)
+                            continue;
+                        existingCount++;
+
+                        if (string.Equals(
+                                handleText,
+                                sampleHandle,
+                                StringComparison.Ordinal))
+                        {
+                            sample = reference;
+                            actualPoint = reference.Position;
+                            actualScale = reference.ScaleFactors;
+                            actualRotation = reference.Rotation;
+                            var definitionId = reference.IsDynamicBlock
+                                ? reference.DynamicBlockTableRecord
+                                : reference.BlockTableRecord;
+                            var definition = verificationTransaction.GetObject(
+                                definitionId,
+                                OpenMode.ForRead) as BlockTableRecord;
+                            actualBlockName = definition?.Name;
+                        }
+                    }
+                    catch
+                    {
+                        // Report unresolved committed references below.
+                    }
+                }
+                verificationTransaction.Commit();
+            }
+
+            var countMatch = insertedCount == insertedHandles.Count &&
+                             existingCount == insertedCount;
+            var sampleExists = insertedCount == 0 || sample != null;
+            var pointMatch = insertedCount == 0;
+            var scaleMatch = insertedCount == 0;
+            var rotationMatch = insertedCount == 0;
+            var blockNameMatch = insertedCount == 0;
+            if (insertedCount > 0)
+            {
+                if (!TryReadPoint(expected, "point", out var expectedPoint) ||
+                    !expected.TryGetValue("scale", out var expectedScaleValue) ||
+                    !TryReadFiniteDouble(
+                        expectedScaleValue,
+                        out var expectedScale) ||
+                    !expected.TryGetValue(
+                        "rotation_radians",
+                        out var expectedRotationValue) ||
+                    !TryReadFiniteDouble(
+                        expectedRotationValue,
+                        out var expectedRotation) ||
+                    !expected.TryGetValue("block_name", out var blockNameValue) ||
+                    !(blockNameValue is string expectedBlockName))
+                {
+                    throw new InvalidDataException(
+                        "blocks insert returned incomplete sample verification metadata.");
+                }
+
+                pointMatch = sampleExists && NearlyEqual(
+                    actualPoint,
+                    expectedPoint,
+                    1e-6);
+                scaleMatch = sampleExists &&
+                    Math.Abs(actualScale.X - expectedScale) <= 1e-9 &&
+                    Math.Abs(actualScale.Y - expectedScale) <= 1e-9 &&
+                    Math.Abs(actualScale.Z - expectedScale) <= 1e-9;
+                rotationMatch = sampleExists &&
+                    AngularDistance(actualRotation, expectedRotation) <= 1e-9;
+                blockNameMatch = sampleExists && string.Equals(
+                    actualBlockName,
+                    expectedBlockName,
+                    StringComparison.OrdinalIgnoreCase);
+            }
+
+            var issues = new List<string>();
+            if (!countMatch)
+                issues.Add(
+                    $"Only {existingCount} of {insertedCount} inserted handles could be reopened after commit.");
+            if (!sampleExists)
+                issues.Add("The first inserted block could not be reopened after commit.");
+            if (sampleExists && !pointMatch)
+                issues.Add("The committed block insertion point differs from the request.");
+            if (sampleExists && !scaleMatch)
+                issues.Add("The committed block scale differs from the request.");
+            if (sampleExists && !rotationMatch)
+                issues.Add("The committed block rotation differs from the request.");
+            if (sampleExists && !blockNameMatch)
+                issues.Add("The committed block definition differs from the request.");
+
+            data.Remove("verification_sample");
+            data["verification"] = new Dictionary<string, object>
+            {
+                ["performed"] = true,
+                ["phase"] = "post_commit",
+                ["provisional"] = false,
+                ["commit_verified"] = true,
+                ["match"] = countMatch && sampleExists && pointMatch &&
+                            scaleMatch && rotationMatch && blockNameMatch,
+                ["inserted_count"] = insertedCount,
+                ["resolvable_inserted_count"] = existingCount,
+                ["count_match"] = countMatch,
+                ["sample_handle"] = sampleHandle,
+                ["sample_exists"] = insertedCount == 0
+                    ? (bool?)null
+                    : sampleExists,
+                ["point_match"] = insertedCount == 0
+                    ? (bool?)null
+                    : pointMatch,
+                ["scale_match"] = insertedCount == 0
+                    ? (bool?)null
+                    : scaleMatch,
+                ["rotation_match"] = insertedCount == 0
+                    ? (bool?)null
+                    : rotationMatch,
+                ["block_name_match"] = insertedCount == 0
+                    ? (bool?)null
+                    : blockNameMatch,
+                ["actual_block_name"] = actualBlockName,
+                ["actual_point"] = insertedCount == 0
+                    ? null
+                    : new[] { actualPoint.X, actualPoint.Y, actualPoint.Z },
+                ["actual_scale"] = insertedCount == 0
+                    ? null
+                    : new[] { actualScale.X, actualScale.Y, actualScale.Z },
+                ["actual_rotation_deg"] = insertedCount == 0
+                    ? (double?)null
+                    : actualRotation * 180.0 / Math.PI,
+                ["issues"] = issues,
+            };
+        }
+
+        private static void FinalizeModifyEntitiesVerification(
+            Database database,
+            CommandResult result)
+        {
+            if (!(result.Data is Dictionary<string, object> data) ||
+                !TryReadNonNegativeInt(data, "mutated_count", out var mutatedCount) ||
+                !data.TryGetValue(
+                    "verification_sample_expected_exists",
+                    out var expectedExistsValue) ||
+                !(expectedExistsValue is bool expectedExists))
+            {
+                throw new InvalidDataException(
+                    "modify_entities did not return verification metadata.");
+            }
+
+            var sampleHandle = data.TryGetValue(
+                    "verification_sample_handle",
+                    out var sampleValue)
+                ? sampleValue as string
+                : null;
+            bool? sampleExists = null;
+            string sampleType = null;
+            if (mutatedCount > 0)
+            {
+                if (string.IsNullOrWhiteSpace(sampleHandle))
+                    throw new InvalidDataException(
+                        "modify_entities did not return a sample handle.");
+
+                sampleExists = TryReadCommittedEntityState(
+                    database,
+                    sampleHandle,
+                    out sampleType);
+            }
+
+            var sampleMatches = mutatedCount == 0 ||
+                sampleExists == expectedExists;
+            var issues = new List<string>();
+            if (!sampleMatches)
+            {
+                issues.Add(
+                    expectedExists
+                        ? "The sample mutated entity could not be reopened after commit."
+                        : "The sample erased entity still exists after commit.");
+            }
+
+            data["verification"] = new Dictionary<string, object>
+            {
+                ["performed"] = true,
+                ["phase"] = "post_commit",
+                ["provisional"] = false,
+                ["commit_verified"] = true,
+                ["match"] = sampleMatches,
+                ["mutated_count"] = mutatedCount,
+                ["sample_handle"] = sampleHandle,
+                ["sample_expected_exists"] =
+                    mutatedCount == 0 ? (bool?)null : expectedExists,
+                ["sample_exists"] = sampleExists,
+                ["sample_type"] = sampleType,
+                ["issues"] = issues,
+            };
+        }
+
+        private static bool TryReadCommittedEntityState(
+            Database database,
+            string handleText,
+            out string entityType)
+        {
+            entityType = null;
+            if (!TryResolveHandle(database, handleText, out var objectId))
+                return false;
+
+            try
+            {
+                using (var verificationTransaction = database
+                           .TransactionManager.StartOpenCloseTransaction())
+                {
+                    var databaseObject = verificationTransaction.GetObject(
+                        objectId,
+                        OpenMode.ForRead,
+                        true);
+                    var exists = databaseObject != null &&
+                                 !databaseObject.IsErased;
+                    if (exists)
+                        entityType = databaseObject.GetType().Name;
+                    verificationTransaction.Commit();
+                    return exists;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryResolveHandle(
+            Database database,
+            string handleText,
+            out ObjectId objectId)
+        {
+            objectId = ObjectId.Null;
+            if (!TryParseQueryHandle(handleText, out var handleValue))
+                return false;
+            try
+            {
+                objectId = database.GetObjectId(
+                    false,
+                    new Handle(handleValue),
+                    0);
+                return !objectId.IsNull;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryParseQueryHandle(
+            string supplied,
+            out long value)
+        {
+            value = 0;
+            if (string.IsNullOrWhiteSpace(supplied))
+                return false;
+            var text = supplied.Trim();
+            if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                return long.TryParse(
+                    text.Substring(2),
+                    NumberStyles.AllowHexSpecifier,
+                    CultureInfo.InvariantCulture,
+                    out value) && value > 0;
+            }
+
+            var hasHexLetter = false;
+            foreach (var character in text)
+            {
+                if ((character >= 'A' && character <= 'F') ||
+                    (character >= 'a' && character <= 'f'))
+                {
+                    hasHexLetter = true;
+                    break;
+                }
+            }
+            return long.TryParse(
+                text,
+                hasHexLetter
+                    ? NumberStyles.AllowHexSpecifier
+                    : NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out value) && value > 0;
+        }
+
+        private static bool TryReadNonNegativeInt(
+            Dictionary<string, object> data,
+            string key,
+            out int value)
+        {
+            value = 0;
+            if (!data.TryGetValue(key, out var raw))
+                return false;
+            switch (raw)
+            {
+                case int integer when integer >= 0:
+                    value = integer;
+                    return true;
+                case long longValue when longValue >= 0 &&
+                                         longValue <= int.MaxValue:
+                    value = (int)longValue;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         private static bool TryReadPoint(
             Dictionary<string, object> parameters,
             string key,
@@ -1128,6 +1677,12 @@ namespace AutoCADMCP.Plugin
                    Math.Abs(left.Z - right.Z) <= tolerance;
         }
 
+        private static double AngularDistance(double left, double right)
+        {
+            var difference = Math.Abs((left - right) % (2.0 * Math.PI));
+            return Math.Min(difference, 2.0 * Math.PI - difference);
+        }
+
         private static object BuildPostCommitFallback(
             object provisionalSnapshot,
             string commandName,
@@ -1156,6 +1711,18 @@ namespace AutoCADMCP.Plugin
             if (string.Equals(
                     commandName,
                     "create_line",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    commandName,
+                    "create_entities",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    commandName,
+                    "modify_entities",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    commandName,
+                    "blocks",
                     StringComparison.Ordinal))
             {
                 augmented["verification"] =

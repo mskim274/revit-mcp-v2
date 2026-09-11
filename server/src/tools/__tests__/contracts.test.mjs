@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import "../../services/__tests__/session-routing.test.mjs";
+import "../../services/__tests__/work-scope.test.mjs";
 
 import { SERVER_VERSION } from "../../../dist/constants.js";
 import { registerCreateTools } from "../../../dist/tools/create.js";
@@ -251,6 +252,7 @@ test("query elements rejects ambiguous filter and grouping combinations", () => 
   assert.equal(defaults.success, true);
   assert.equal(defaults.data.summary_only, true);
   assert.equal(defaults.data.ids_only, false);
+  assert.equal(defaults.data.include_links, false);
 
   for (const matchMode of ["exact", "contains", "empty"]) {
     assert.equal(
@@ -323,12 +325,14 @@ test("query elements rejects ambiguous filter and grouping combinations", () => 
   const normalizedFilters = query.safeParse({
     category: "Walls",
     level_filter: " Level 1 ",
+    workset_filter: " Architecture ",
     type_filter: " Basic Wall ",
     parameter_name: "Mark",
     parameter_value: " A ",
   });
   assert.equal(normalizedFilters.success, true);
   assert.equal(normalizedFilters.data.level_filter, "Level 1");
+  assert.equal(normalizedFilters.data.workset_filter, "Architecture");
   assert.equal(normalizedFilters.data.type_filter, "Basic Wall");
   assert.equal(normalizedFilters.data.parameter_value, "A");
 
@@ -357,6 +361,48 @@ test("query elements rejects ambiguous filter and grouping combinations", () => 
   );
 });
 
+test("query elements forwards linked-model and exact host-workset options", async () => {
+  const tool = tools.get("revit_query_elements");
+  assert.ok(tool);
+  const query = schema("revit_query_elements");
+
+  assert.equal(
+    query.safeParse({ category: "Walls", workset_filter: "   " }).success,
+    false
+  );
+  assert.equal(
+    query.safeParse({ category: "Walls", include_links: "true" }).success,
+    false
+  );
+
+  const parsed = query.safeParse({
+    category: "Walls",
+    include_links: true,
+    workset_filter: " Core ",
+  });
+  assert.equal(parsed.success, true);
+  const result = await tool.handler(parsed.data);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.params.include_links, true);
+  assert.equal(payload.params.workset_filter, "Core");
+});
+
+test("room workflows stay query/export-only", () => {
+  const query = tools.get("revit_query_elements");
+  assert.ok(query);
+  assert.match(query.config.description, /category="Rooms"/);
+  assert.match(query.config.description, /revit_export_schedule/);
+  assert.equal(tools.has("revit_create_room"), false);
+});
+
+test("linked-model discovery is registered read-only", () => {
+  const linkedModels = tools.get("revit_get_linked_models");
+  assert.ok(linkedModels);
+  assert.equal(parseInput(linkedModels, {}).success, true);
+  assert.equal(linkedModels.config.annotations.readOnlyHint, true);
+  assert.equal(linkedModels.config.annotations.destructiveHint, false);
+});
+
 test("raw query element value filters fail closed on blank strings", () => {
   const source = readFileSync(
     new URL(
@@ -366,7 +412,12 @@ test("raw query element value filters fail closed on blank strings", () => {
     "utf8"
   );
 
-  for (const key of ["level_filter", "type_filter", "parameter_value"]) {
+  for (const key of [
+    "level_filter",
+    "workset_filter",
+    "type_filter",
+    "parameter_value",
+  ]) {
     assert.match(
       source,
       new RegExp(
@@ -375,6 +426,7 @@ test("raw query element value filters fail closed on blank strings", () => {
     );
   }
   assert.match(source, /string\.IsNullOrWhiteSpace\(text\)/);
+  assert.match(source, /TryGetOptionalStrictBool\([\s\S]*?"include_links"/);
   assert.match(source, /use match_mode='empty' to find unfilled values/i);
 });
 
@@ -564,6 +616,189 @@ test("duplicate views requires 1-100 combined strict targets", () => {
   );
 });
 
+test("family placement is exact, batched, unit-explicit, and retry-safe", async () => {
+  const tool = tools.get("revit_place_family");
+  assert.ok(tool);
+  const input = schema("revit_place_family");
+
+  assert.equal(input.safeParse({}).success, false);
+  assert.equal(input.safeParse({ placements: [] }).success, false);
+  assert.equal(
+    input.safeParse({
+      placements: [{ point: [0, 0, 0] }],
+    }).success,
+    false
+  );
+  assert.equal(
+    input.safeParse({
+      placements: [{ type_id: 1, family_name: "Desk", type_name: "A", point: [0, 0, 0] }],
+    }).success,
+    false
+  );
+  assert.equal(
+    input.safeParse({
+      placements: [{ family_name: "Desk", type_name: "A", point: [0, 0, 0], level_id: 2, level_name: "L1" }],
+    }).success,
+    false
+  );
+  assert.equal(
+    input.safeParse({
+      placements: [{ type_id: 1, point: [0, Number.NaN, 0] }],
+    }).success,
+    false
+  );
+  assert.equal(
+    input.safeParse({
+      placements: Array.from({ length: 51 }, (_, index) => ({
+        type_id: 1,
+        point: [index, 0, 0],
+      })),
+    }).success,
+    false
+  );
+
+  const parsed = input.safeParse({
+    placements: [{
+      family_name: " Desk ",
+      type_name: " 1200 ",
+      point: [1000, 2000, 3000],
+      level_name: " L1 ",
+    }],
+    input_unit: "mm",
+    idempotency_key: "family-placement-key",
+  });
+  assert.equal(parsed.success, true);
+  assert.equal(parsed.data.placements[0].family_name, "Desk");
+  assert.equal(parsed.data.placements[0].type_name, "1200");
+  assert.equal(parsed.data.placements[0].level_name, "L1");
+  const result = await tool.handler(parsed.data);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.command, "place_family");
+  assert.equal(payload.params.input_unit, "mm");
+  assert.equal(payload.params.idempotency_key, "family-placement-key");
+});
+
+test("sheet discovery is read-only and viewport placement is a bounded batch", async () => {
+  const sheets = tools.get("revit_get_sheets");
+  assert.ok(sheets);
+  assert.equal(parseInput(sheets, {}).success, true);
+  assert.equal(sheets.config.annotations.readOnlyHint, true);
+  assert.equal(sheets.config.annotations.destructiveHint, false);
+
+  const tool = tools.get("revit_place_views_on_sheet");
+  assert.ok(tool);
+  const input = schema("revit_place_views_on_sheet");
+  assert.equal(input.safeParse({}).success, false);
+  assert.equal(input.safeParse({ sheet_id: 1, placements: [] }).success, false);
+  assert.equal(
+    input.safeParse({
+      sheet_id: 1,
+      placements: [{ view_id: 2, point: [0, Number.POSITIVE_INFINITY] }],
+    }).success,
+    false
+  );
+  assert.equal(
+    input.safeParse({
+      sheet_id: 1,
+      placements: Array.from({ length: 51 }, (_, index) => ({
+        view_id: index + 2,
+        point: [index, 0],
+      })),
+    }).success,
+    false
+  );
+
+  const parsed = input.safeParse({
+    sheet_id: "9007199254740993",
+    placements: [{ view_id: 2, point: [100, 200] }],
+    input_unit: "mm",
+    idempotency_key: "viewport-placement-key",
+  });
+  assert.equal(parsed.success, true);
+  const result = await tool.handler(parsed.data);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.command, "place_views_on_sheet");
+  assert.equal(payload.params.sheet_id, "9007199254740993");
+  assert.equal(payload.params.input_unit, "mm");
+  assert.equal(payload.params.idempotency_key, "viewport-placement-key");
+});
+
+test("selection zoom defaults false and is forwarded to the UI action", async () => {
+  const tool = tools.get("revit_select_elements");
+  assert.ok(tool);
+  const defaults = parseInput(tool, { element_ids: [1] });
+  assert.equal(defaults.success, true);
+  assert.equal(defaults.data.zoom, false);
+  assert.equal(
+    parseInput(tool, { element_ids: [1], zoom: "true" }).success,
+    false
+  );
+
+  const parsed = parseInput(tool, {
+    element_ids: [1, 2],
+    zoom: true,
+    idempotency_key: "select-zoom-key",
+  });
+  assert.equal(parsed.success, true);
+  const result = await tool.handler(parsed.data);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.params.zoom, true);
+  assert.equal(payload.params.idempotency_key, "select-zoom-key");
+
+  const hostSource = readFileSync(
+    new URL(
+      "../../../../plugin/RevitMCPPlugin/WebSocketServer.cs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  assert.match(hostSource, /uiDocument\.ShowElements\(selectionIds\)/);
+});
+
+test("linked-soffit wall modification defaults to dry-run and fails closed", async () => {
+  const tool = tools.get("revit_modify_wall_height_to_linked_soffit");
+  assert.ok(tool);
+  const input = schema("revit_modify_wall_height_to_linked_soffit");
+  const defaults = input.safeParse({ element_ids: [1] });
+  assert.equal(defaults.success, true);
+  assert.equal(defaults.data.dry_run, true);
+  assert.equal(defaults.data.link_name_contains, "ST_");
+  assert.equal(defaults.data.step_tolerance_mm, 20);
+  assert.equal(input.safeParse({ element_ids: [] }).success, false);
+  assert.equal(input.safeParse({ element_ids: [1], dry_run: "true" }).success, false);
+  assert.equal(input.safeParse({ element_ids: [1], link_name_contains: "   " }).success, false);
+  assert.equal(input.safeParse({ element_ids: [1], step_tolerance_mm: -1 }).success, false);
+  assert.equal(
+    input.safeParse({
+      element_ids: Array.from({ length: 51 }, (_, index) => index + 1),
+    }).success,
+    false
+  );
+
+  const parsed = input.safeParse({
+    element_ids: [1],
+    dry_run: false,
+    idempotency_key: "linked-soffit-key",
+  });
+  assert.equal(parsed.success, true);
+  const result = await tool.handler(parsed.data);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.command, "modify_wall_height_to_linked_soffit");
+  assert.equal(payload.params.dry_run, false);
+  assert.equal(payload.params.idempotency_key, "linked-soffit-key");
+
+  const source = readFileSync(
+    new URL(
+      "../../../../commandset/Commands/Modify/ModifyWallHeightToLinkedSoffitCommand.cs",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  assert.match(source, /"dry_run",\s*defaultValue:\s*true/);
+  assert.match(source, /TryGetOptionalStrictBool/);
+  assert.match(source, /new SubTransaction\(doc\)/);
+});
+
 test("schedule export requires a target and defaults to no overwrite", () => {
   const scheduleExport = schema("revit_export_schedule");
   assert.equal(scheduleExport.safeParse({}).success, false);
@@ -582,6 +817,35 @@ test("schedule export requires a target and defaults to no overwrite", () => {
     }).success,
     false
   );
+});
+
+test("view export defaults safely and forwards idempotency", async () => {
+  const viewExport = tools.get("revit_export_view");
+  assert.ok(viewExport);
+  assert.equal(viewExport.config.annotations.readOnlyHint, false);
+  assert.equal(viewExport.config.annotations.idempotentHint, true);
+  const input = schema("revit_export_view");
+
+  const defaults = input.safeParse({});
+  assert.equal(defaults.success, true);
+  assert.equal(defaults.data.format, "png");
+  assert.equal(defaults.data.overwrite, false);
+  assert.equal(input.safeParse({ view_name: "   " }).success, false);
+  assert.equal(input.safeParse({ format: "pdf" }).success, false);
+  assert.equal(input.safeParse({ overwrite: "false" }).success, false);
+
+  const parsed = input.safeParse({
+    view_name: " Level 1 ",
+    format: "jpg",
+    idempotency_key: "view-export-key",
+  });
+  assert.equal(parsed.success, true);
+  assert.equal(parsed.data.view_name, "Level 1");
+  const result = await viewExport.handler(parsed.data);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.command, "export_view");
+  assert.equal(payload.params.overwrite, false);
+  assert.equal(payload.params.idempotency_key, "view-export-key");
 });
 
 test("view selection and temporary visibility share the C# 500-ID cap", () => {
@@ -908,6 +1172,23 @@ test("side-effect handlers forward stable idempotency keys", async () => {
     ["revit_export_schedule", {
       schedule_id: 1,
       idempotency_key: "export-key",
+    }],
+    ["revit_export_view", {
+      view_id: 1,
+      idempotency_key: "view-export-key",
+    }],
+    ["revit_place_family", {
+      placements: [{ type_id: 1, point: [0, 0, 0] }],
+      idempotency_key: "family-key",
+    }],
+    ["revit_place_views_on_sheet", {
+      sheet_id: 1,
+      placements: [{ view_id: 2, point: [0, 0] }],
+      idempotency_key: "sheet-key",
+    }],
+    ["revit_modify_wall_height_to_linked_soffit", {
+      element_ids: [1],
+      idempotency_key: "soffit-key",
     }],
   ];
 

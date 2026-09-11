@@ -46,9 +46,24 @@ namespace AutoCADMCP.CommandSet.Interfaces
         public object Data { get; set; }
         public string ErrorMessage { get; set; }
         public string Suggestion { get; set; }
+        /// <summary>
+        /// Whether the dispatcher should commit its transaction after a
+        /// successful command. Query scripts set this to false so any model
+        /// writes attempted through the supplied transaction are rolled back.
+        /// External-file exports also use false when they make no database
+        /// changes. Ordinary commands keep the default commit behavior.
+        /// </summary>
+        public bool CommitTransaction { get; set; } = true;
 
-        public static CommandResult Ok(object data)
-            => new CommandResult { Success = true, Data = data };
+        public static CommandResult Ok(
+            object data,
+            bool commitTransaction = true)
+            => new CommandResult
+            {
+                Success = true,
+                Data = data,
+                CommitTransaction = commitTransaction,
+            };
 
         public static CommandResult Fail(string message, string suggestion = null)
             => new CommandResult { Success = false, ErrorMessage = message, Suggestion = suggestion };
