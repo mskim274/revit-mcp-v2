@@ -9,6 +9,8 @@ changes are still fair game.
 ## [Unreleased]
 
 ### Fixed
+- Updated compatible transitive `fast-uri`, `hono`, and `qs` versions to
+  resolve the production dependency advisories detected by CI.
 - Isolated AutoCAD script compiler dependencies from AutoCAD's older Roslyn
   assemblies. A Roslyn-free command boundary checks opt-in before loading;
   generated scripts share the exact API/globals assemblies. Deploy the new
