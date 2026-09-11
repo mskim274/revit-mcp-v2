@@ -10,6 +10,8 @@ export interface CommandRequest {
   // Older plugins ignore unknown fields, preserving wire compatibility.
   target_session_id?: string;
   expected_document_fingerprint?: string;
+  agent_id?: string;
+  work_scope_token?: string;
 }
 
 export interface CommandResponse {
@@ -47,6 +49,13 @@ export type ErrorCode =
   | "TARGET_DOCUMENT_MISMATCH"
   | "TARGET_SELECTION_REQUIRED"
   | "SESSION_NOT_FOUND"
+  | "WORK_SCOPE_REQUIRED"
+  | "WORK_SCOPE_UNSUPPORTED"
+  | "WORK_SCOPE_CONFLICT"
+  | "WORK_SCOPE_EXPIRED"
+  | "WORK_SCOPE_OUTSIDE"
+  | "WORK_SCOPE_STALE"
+  | "WORK_SCOPE_TRACKING_FAILED"
   | "VALIDATION_ERROR"
   | "INTERNAL_ERROR";
 

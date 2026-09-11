@@ -4,6 +4,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CommandSet", "commandset\Co
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AutoCADMCPPlugin", "plugin\AutoCADMCPPlugin\AutoCADMCPPlugin.csproj", "{B2F3E5F1-2222-4222-B222-222222222222}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScriptEngine", "script-engine\ScriptEngine.csproj", "{C3F4E6F2-3333-4333-B333-333333333333}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -18,5 +20,9 @@ Global
 		{B2F3E5F1-2222-4222-B222-222222222222}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B2F3E5F1-2222-4222-B222-222222222222}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B2F3E5F1-2222-4222-B222-222222222222}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C3F4E6F2-3333-4333-B333-333333333333}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C3F4E6F2-3333-4333-B333-333333333333}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C3F4E6F2-3333-4333-B333-333333333333}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C3F4E6F2-3333-4333-B333-333333333333}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

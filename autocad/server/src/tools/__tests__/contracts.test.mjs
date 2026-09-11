@@ -532,16 +532,38 @@ test("create_line verification is provisional until post-commit reopen", () => {
   assert.match(commandSource, /\["commit_verified"\] = false/);
   assert.match(commandSource, /\["performed"\] = false/);
 
-  const commitIndex = pluginSource.indexOf("tr.Commit();");
+  const commitIndex = pluginSource.indexOf(
+    "transactionCommitted = transactionOutcome.Committed;",
+  );
   const finalVerificationIndex = pluginSource.indexOf(
     "FinalizePostCommitVerification(",
     commitIndex,
   );
   assert.ok(commitIndex >= 0);
   assert.ok(finalVerificationIndex > commitIndex);
+  assert.match(pluginSource,
+    /if \(transactionCommitted && transactionOutcome\.DisposalSucceeded\)/);
   assert.match(pluginSource, /StartOpenCloseTransaction\(\)/);
   assert.match(pluginSource, /\["phase"\] = "post_commit"/);
   assert.match(pluginSource, /\["commit_verified"\] = true/);
+});
+
+test("script compiler is isolated from host with shared API/global identity", () => {
+  const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  const wrapper = source("../../../../commandset/Commands/ExecuteScriptCommand.cs");
+  const context = source("../../../../commandset/Helpers/ScriptEngineLoadContext.cs");
+  const engine = source("../../../../script-engine/CadScriptEngine.cs");
+  const project = source("../../../../plugin/AutoCADMCPPlugin/AutoCADMCPPlugin.csproj");
+  assert.doesNotMatch(wrapper, /using Microsoft\.CodeAnalysis/);
+  assert.ok(wrapper.indexOf('GetEnvironmentVariable("AUTOCAD_MCP_ENABLE_SCRIPT")') <
+    wrapper.indexOf("var engine = ScriptEngine.Value"));
+  assert.match(wrapper, /EnterContextualReflection/);
+  assert.match(context, /_shared\.TryGetValue/);
+  assert.match(context, /throw new FileNotFoundException/);
+  assert.match(context, /LoadFromAssemblyPath\(path\)/);
+  assert.match(engine, /assemblyLoader\.RegisterDependency\(dependency\)/);
+  assert.match(project, /ScriptEngine\.csproj" ReferenceOutputAssembly="false"/);
+  assert.match(project, /DestinationFolder="\$\(TargetDir\)script-engine"/);
 });
 
 test("batch commands and xrefs have C# registrations and post-commit verification", () => {
@@ -561,7 +583,7 @@ test("batch commands and xrefs have C# registrations and post-commit verificatio
   );
   const scriptSource = readFileSync(
     new URL(
-      "../../../../commandset/Commands/ExecuteScriptCommand.cs",
+      "../../../../script-engine/CadScriptEngine.cs",
       import.meta.url,
     ),
     "utf8",
@@ -604,7 +626,10 @@ test("batch commands and xrefs have C# registrations and post-commit verificatio
   assert.match(infoSource, /\["is_unresolved"\] = isUnresolved/);
   assert.match(pluginSource, /FinalizeCreateEntitiesVerification/);
   assert.match(pluginSource, /FinalizeModifyEntitiesVerification/);
-  assert.match(pluginSource, /if \(result\.CommitTransaction\)/);
+  assert.match(pluginSource, /TransactionBoundary\.RunAsync\(/);
+  assert.match(pluginSource, /return result\.CommitTransaction;/);
+  assert.doesNotMatch(pluginSource, /tr\?\.Abort\(/);
+  assert.match(pluginSource, /TRANSACTION_CLEANUP_ERROR/);
   assert.match(querySource, /\["handle"\] = handle/);
   assert.match(indexSource, /registerModifyTools\(server, wsClient\)/);
   assert.match(indexSource, /registerScriptTools\(server, wsClient\)/);

@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\commandset\CommandSet.csproj" />
+    <ProjectReference Include="..\..\script-engine\ScriptEngine.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <!-- AutoCAD .NET API: installed DLLs locally, Autodesk's compile-only
@@ -46,4 +47,13 @@
     </PackageReference>
   </ItemGroup>
 
+  <!-- Compiler dependencies must NOT be normal host references/default-ALC
+       dependencies. Deploy this private folder together with the host. -->
+  <Target Name="CopyPrivateScriptEngine" AfterTargets="Build">
+    <ItemGroup>
+      <PrivateScriptFiles Include="$(MSBuildProjectDirectory)\..\..\script-engine\bin\$(Configuration)\$(TargetFramework)\AutoCADMCP.ScriptEngine.*" />
+      <PrivateScriptFiles Include="$(MSBuildProjectDirectory)\..\..\script-engine\bin\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PrivateScriptFiles)" DestinationFolder="$(TargetDir)script-engine" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

@@ -650,6 +650,11 @@ namespace AutoCADMCP.Plugin
                     Exception captured = null;
                     object responseData = null;
                     var transactionCommitted = false;
+                    Exception transactionCleanupError = null;
+                    var dispatchTimer = Stopwatch.StartNew();
+                    void RecordError(string phase, Exception error) =>
+                        DiagnosticLog.Write(id, commandName, phase, timeoutMs,
+                            dispatchTimer.ElapsedMilliseconds, error);
 
                     // Pre-capture PICKFIRST before entering command context.
                     Autodesk.AutoCAD.DatabaseServices.ObjectId[] preSelection
@@ -682,12 +687,9 @@ namespace AutoCADMCP.Plugin
                         await acadDocs.ExecuteInCommandContextAsync(
                             async (object _) =>
                         {
-                            Transaction tr = null;
-                            try
-                            {
-                                using (tr = activeDoc.Database
-                                           .TransactionManager
-                                           .StartTransaction())
+                            var transactionOutcome = await TransactionBoundary.RunAsync(
+                                () => activeDoc.Database.TransactionManager.StartTransaction(),
+                                async tr =>
                                 {
                                     result = await command.ExecuteAsync(
                                         activeDoc.Database,
@@ -706,39 +708,32 @@ namespace AutoCADMCP.Plugin
                                                 result.Data);
                                         executionCts.Token
                                             .ThrowIfCancellationRequested();
-                                        if (result.CommitTransaction)
-                                        {
-                                            tr.Commit();
-                                            transactionCommitted = true;
-                                        }
-                                        else
-                                        {
-                                            // Query scripts deliberately use
-                                            // the dispatcher transaction for
-                                            // reads, then abort it so writes
-                                            // attempted through the supplied
-                                            // tr global cannot persist.
-                                            tr.Abort();
-                                        }
+                                        return result.CommitTransaction;
                                     }
-                                    else
-                                        tr.Abort();
-                                }
-                            }
-                            catch (Exception ex)
+                                    if (result != null)
+                                        RecordError("command_failed", new InvalidOperationException(
+                                            result.ErrorMessage ?? "Command returned failure."));
+                                    return false;
+                                },
+                                tr => tr.Commit(),
+                                tr => tr.Abort(),
+                                RecordError);
+                            transactionCommitted = transactionOutcome.Committed;
+                            captured = transactionOutcome.Error;
+                            transactionCleanupError = transactionOutcome.CleanupError;
+                            if (transactionCommitted && !transactionOutcome.DisposalSucceeded)
                             {
-                                captured = ex;
-                                if (!transactionCommitted)
-                                {
-                                    try { tr?.Abort(); }
-                                    catch { /* already rolled back/disposed */ }
-                                }
+                                // Committed writes must never be reported as rolled back.
+                                // Do not start another native transaction after failed cleanup.
+                                responseData = BuildPostCommitFallback(
+                                    responseData, commandName, isSideEffect,
+                                    transactionOutcome.CleanupError);
                             }
 
                             // The command transaction has been disposed here.
                             // Only now may final verification open a fresh
                             // read transaction against the committed ObjectId.
-                            if (transactionCommitted)
+                            if (transactionCommitted && transactionOutcome.DisposalSucceeded)
                             {
                                 try
                                 {
@@ -755,6 +750,7 @@ namespace AutoCADMCP.Plugin
                                 }
                                 catch (Exception verificationError)
                                 {
+                                    RecordError("post_commit_verification", verificationError);
                                     Debug.WriteLine(
                                         "[AutoCADMCP] Post-commit " +
                                         "verification warning: " +
@@ -771,6 +767,7 @@ namespace AutoCADMCP.Plugin
                     }
                     catch (Exception contextError)
                     {
+                        RecordError("command_context", contextError);
                         captured = contextError;
                     }
                     finally
@@ -805,6 +802,13 @@ namespace AutoCADMCP.Plugin
 
                     if (captured != null && !transactionCommitted)
                     {
+                        if (transactionCleanupError != null)
+                            return ErrorEnvelope(
+                                id, "TRANSACTION_CLEANUP_ERROR",
+                                $"{captured.Message} Cleanup also failed: {transactionCleanupError.Message}",
+                                recoverable: false,
+                                suggestion: "Rollback could not be confirmed. Do not retry automatically. " +
+                                    "Inspect the drawing and %LOCALAPPDATA%/AutoCADMCP/logs before restarting AutoCAD.");
                         if (captured is OperationCanceledException
                             && executionCts.IsCancellationRequested)
                         {
@@ -823,7 +827,8 @@ namespace AutoCADMCP.Plugin
                             captured.Message,
                             recoverable: true,
                             suggestion:
-                                "AutoCAD API call failed; see plugin logs.");
+                                "AutoCAD API call failed. Inspect %LOCALAPPDATA%/AutoCADMCP/logs " +
+                                "for the original exception before retrying. Do not blindly retry after a crash.");
                     }
                     if (captured != null)
                     {

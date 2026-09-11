@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>AutoCADMCP.ScriptEngine</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AutoCAD2025Path Condition="'$(AUTOCAD_2025_PATH)' != ''">$(AUTOCAD_2025_PATH)</AutoCAD2025Path>
+    <AutoCAD2025Path Condition="'$(AutoCAD2025Path)' == ''">C:\Program Files\Autodesk\AutoCAD 2025</AutoCAD2025Path>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\commandset\CommandSet.csproj" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.9.2" />
+  </ItemGroup>
+  <ItemGroup Condition="Exists('$(AutoCAD2025Path)\accoremgd.dll')">
+    <Reference Include="accoremgd"><HintPath>$(AutoCAD2025Path)\accoremgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acdbmgd"><HintPath>$(AutoCAD2025Path)\acdbmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acmgd"><HintPath>$(AutoCAD2025Path)\acmgd.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('$(AutoCAD2025Path)\accoremgd.dll')">
+    <PackageReference Include="AutoCAD.NET" Version="25.0.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>compile; build; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>

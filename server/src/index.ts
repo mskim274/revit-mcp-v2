@@ -23,6 +23,7 @@ import { registerExportTools } from "./tools/export.js";
 import { registerVisualizeTools } from "./tools/visualize.js";
 import { registerScriptTools } from "./tools/script.js";
 import { registerSessionTools } from "./tools/sessions.js";
+import { registerWorkScopeTools } from "./tools/work-scope.js";
 
 async function main(): Promise<void> {
   // Initialize MCP Server
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
 
   // Register all tools
   registerSessionTools(server, wsClient);
+  registerWorkScopeTools(server, wsClient);
   registerUtilityTools(server, wsClient);
   registerQueryTools(server, wsClient);
   registerCreateTools(server, wsClient);

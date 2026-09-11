@@ -9,8 +9,8 @@ Model Context Protocol server for Autodesk Revit. It lets MCP clients such as
 Grok CLI (including Orca), Codex, and Claude query, create, modify, review,
 and export model data in one or more running Revit sessions.
 
-This development branch registers **58 tools across both TypeScript servers:
-43 for Revit and 15 for AutoCAD**. The latest stable release may contain fewer
+This development branch registers **59 tools across both TypeScript servers:
+44 for Revit and 15 for AutoCAD**. The latest stable release may contain fewer
 tools; see [Releases](https://github.com/mskim274/revit-mcp-v2/releases) and
 [CHANGELOG.md](CHANGELOG.md) for version-specific contents.
 
@@ -174,13 +174,14 @@ still use the configured legacy port. The server probes the endpoint first and
 uses this fallback only when the ping response has no new session identity; a
 new plugin with a missing registry record is blocked instead of routed blindly.
 
-## Tool inventory (58 total: Revit 43 + AutoCAD 15)
+## Tool inventory (59 total: Revit 44 + AutoCAD 15)
 
-### Revit (43)
+### Revit (44)
 
 | Category | Count | Tools |
 |---|---:|---|
 | Session | 3 | `revit_list_sessions`, `revit_set_target`, `revit_get_target` |
+| Coordination | 1 | `revit_work_scope` — reserve, inspect, renew and release work ranges across MCP processes |
 | Utility | 4 | `revit_ping`, `revit_get_project_info`, `revit_get_commandset_status`, `revit_reload_commandset` |
 | Query | 12 | `revit_get_levels`, `revit_get_views`, `revit_get_grids`, `revit_query_elements`, `revit_get_linked_models`, `revit_get_sheets`, `revit_get_element_info`, `revit_get_element_geometry`, `revit_get_selected_elements`, `revit_get_types_by_category`, `revit_get_family_types`, `revit_get_all_categories` |
 | Create | 4 | `revit_create_wall`, `revit_create_floor`, `revit_create_pipe_run`, `revit_place_family` |
@@ -189,6 +190,16 @@ new plugin with a missing registry record is blocked instead of routed blindly.
 | Export | 2 | `revit_export_schedule`, `revit_export_view` |
 | Visualize / Review | 2 | `revit_apply_color_filter`, `revit_tag_by_filter` |
 | Script | 1 | `revit_execute_script` |
+
+For multiple agents on one model, see [work scope coordination](docs/WORK_SCOPE_COORDINATION.md).
+Check the running host with `revit_work_scope op=status` first: `supported=false`
+means already-authorized work can continue using existing tools with one writer,
+fresh reads and verification, without extra exception approval. A newer tool
+catalog alone does not make reservations mandatory on older plugins.
+For supported, enabled coordination, acquire before querying data used to calculate
+edits. The host then rejects overlap, out-of-scope writes, expired tokens and stale
+evidence. Element scopes permit built-in instance Comments/Mark changes; other
+side effects need document scope. Installing this feature requires a Revit restart.
 
 `revit_query_elements` keeps host-only behavior by default. Set
 `include_links=true` to include loaded link documents (unloaded links are
@@ -254,8 +265,11 @@ exact-name layout; output defaults to `%TEMP%\cad-mcp-exports`, replacement is
 disabled unless `overwrite=true`, and success verifies that the PDF is non-empty.
 
 `revit_execute_script` is an advanced escape hatch, not a security sandbox.
-It is disabled unless `REVIT_MCP_ENABLE_SCRIPT=1` and every execution requires
-approval in Revit. `cad_execute_script` is independently disabled unless the
+It is disabled unless `REVIT_MCP_ENABLE_SCRIPT=1`. Enabled scripts require
+approval in Revit by default; the explicit Windows User preference
+`REVIT_MCP_SCRIPT_APPROVAL=auto` suppresses query/modify dialogs. `prompt`
+restores them without restarting. See [script approval](docs/SCRIPT_APPROVAL.md)
+for scope, risks, and configuration. `cad_execute_script` is independently disabled unless the
 AutoCAD process starts with `AUTOCAD_MCP_ENABLE_SCRIPT=1`; query mode aborts its
 transaction, modify mode commits it, and there is no UI approval dialog. Review
 all script requests and mutation modes before use.
@@ -323,6 +337,10 @@ updates. Report vulnerabilities privately through GitHub Security Advisories.
 Contributor setup, test commands, confidentiality rules, and the pull request
 checklist are in [CONTRIBUTING.md](CONTRIBUTING.md). Command architecture and
 AI-first tool contracts are documented in [CLAUDE.md](CLAUDE.md).
+
+For drawing reviews and model metadata work, follow the
+[scoped BIM workflow](docs/BIM_WORKFLOW.md). It covers category boundaries,
+reference quality, batch verification, and recovery of out-of-scope edits.
 
 ## License
 

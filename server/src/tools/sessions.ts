@@ -150,7 +150,7 @@ Revit commands will then return TARGET_SELECTION_REQUIRED.`,
       }
 
       if (params.clear) {
-        wsClient.clearTarget();
+        await wsClient.clearTarget();
         return jsonResult({
           selected: false,
           target: null,

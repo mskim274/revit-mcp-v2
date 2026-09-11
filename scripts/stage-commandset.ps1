@@ -6,7 +6,10 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
 
-    [switch]$NoRestore
+    [switch]$NoRestore,
+
+    # Compile against the exact contract in the running host for a hotfix.
+    [string]$HostContractsPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +18,15 @@ $framework = 'net8.0-windows'
 $revitInstall = "C:\Program Files\Autodesk\Revit $RevitVersion"
 $stageRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'RevitMCP\CommandSets\staged'))
 $stagePrefix = $stageRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+
+if (-not [string]::IsNullOrWhiteSpace($HostContractsPath)) {
+    $HostContractsPath = [IO.Path]::GetFullPath($HostContractsPath)
+    if (-not (Test-Path -LiteralPath $HostContractsPath -PathType Leaf) -or
+        [IO.Path]::GetFileName($HostContractsPath) -ne 'RevitMCP.Contracts.dll') {
+        throw 'HostContractsPath must identify an existing RevitMCP.Contracts.dll.'
+    }
+}
+$contractsBuildProperty = "-p:CommandSetContractsPath=$HostContractsPath"
 
 if (Test-Path -LiteralPath $stageRoot) {
     $stageInfo = Get-Item -LiteralPath $stageRoot -Force
@@ -71,7 +83,7 @@ try {
 
     $commandSetProject = Join-Path $repoRoot 'commandset\CommandSet.csproj'
     if (-not $NoRestore) {
-        dotnet restore $commandSetProject -p:TargetFramework=$framework
+        dotnet restore $commandSetProject -p:TargetFramework=$framework $contractsBuildProperty
         if ($LASTEXITCODE -ne 0) {
             throw 'CommandSet restore failed.'
         }
@@ -80,6 +92,7 @@ try {
     dotnet build $commandSetProject `
         -c $Configuration `
         -f $framework `
+        $contractsBuildProperty `
         --no-restore `
         --nologo
     if ($LASTEXITCODE -ne 0) {
@@ -91,6 +104,9 @@ try {
     $commandSetAssembly = Join-Path $commandSetOutput 'RevitMCP.CommandSet.dll'
     $commandSetDeps = Join-Path $commandSetOutput 'RevitMCP.CommandSet.deps.json'
     $contractsAssembly = Join-Path $contractsOutput 'RevitMCP.Contracts.dll'
+    if (-not [string]::IsNullOrWhiteSpace($HostContractsPath)) {
+        $contractsAssembly = $HostContractsPath
+    }
     foreach ($required in @($commandSetAssembly, $commandSetDeps, $contractsAssembly)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
             throw "Required CommandSet build output is missing: $required"

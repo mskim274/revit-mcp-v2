@@ -36,8 +36,10 @@ export function registerScriptTools(
 - All Revit API lengths are in FEET (use MmToFt/FtToMm)
 
 **mode (transaction safety):**
-- \`"query"\` (default): opens no Revit transaction, so normal model edits fail. This is not a security sandbox: some APIs can still perform non-model side effects such as export, and every script requires approval in Revit.
-- \`"modify"\`: wrapped in ONE transaction; runtime exceptions roll back model changes. Every script requires approval in Revit; show the user a summary before submitting it.
+- \`"query"\` (default): opens no Revit transaction, so normal model edits fail. This is not a security sandbox: some APIs can still perform non-model side effects such as export.
+- \`"modify"\`: wrapped in ONE transaction; runtime exceptions roll back model changes. Show the user a summary before submitting it.
+
+**Approval:** per-script Revit UI confirmation by default. An explicitly authorized Windows User setting \`REVIT_MCP_SCRIPT_APPROVAL=auto\` suppresses the dialog for query AND modify. \`prompt\` restores it; unset defaults to prompt. The plugin reads the persistent User setting on each request, with no restart. RPC parameters cannot enable automatic approval. Successful responses report the actual \`approval\` policy and source; auto mode never claims a human clicked Yes. Always review the user's requested scope and script, even in auto mode.
 
 **Self-repair loop:** compile errors return line-numbered diagnostics — fix the code and call again. Runtime errors include the last 10 print() lines for debugging.
 
@@ -58,7 +60,7 @@ Examples:
           .enum(["query", "modify"])
           .optional()
           .default("query")
-          .describe('"query" = no model transaction, but not a complete side-effect sandbox. "modify" = single transaction with rollback on runtime error. Both require Revit UI approval.'),
+          .describe('"query" = no model transaction, not a sandbox. "modify" = one transaction with rollback on runtime error. UI approval is required unless explicitly enabled Windows User auto-approval applies.'),
         timeout_ms: z
           .number()
           .int()

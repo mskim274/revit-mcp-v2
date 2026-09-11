@@ -56,6 +56,18 @@ updater/publish/
 /포디움_3F_CAD_*.json
 /.skill-staging/
 
+# Live BIM evidence, client drawings, local reports, and automation scratch.
+# Keep reusable, project-independent guidance under docs/ instead.
+/bim-standards/
+/output/
+/outputs/
+/reviews/
+/tmp/
+/.playwright-mcp/
+/*.png
+__pycache__/
+*.pyc
+
 # Ad-hoc working files / scratch exports
 # (Data dumps, DAX/M expression drafts, generated TMDL — not source)
 scratch/

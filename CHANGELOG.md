@@ -8,7 +8,31 @@ changes are still fair game.
 
 ## [Unreleased]
 
+### Fixed
+- Isolated AutoCAD script compiler dependencies from AutoCAD's older Roslyn
+  assemblies. A Roslyn-free command boundary checks opt-in before loading;
+  generated scripts share the exact API/globals assemblies. Deploy the new
+  `script-engine` folder with the matching Host/CommandSet and restart AutoCAD.
+- Fixed AutoCAD host transaction cleanup accessing a disposed native transaction
+  after command/cancellation/serialization exceptions. One transaction boundary
+  preserves commit state, never retries cleanup, and logs original exceptions
+  before disposal. Added 16 host-independent lifecycle regression scenarios.
+  Requires AutoCAD restart; Revit is unaffected.
+
 ### Added
+- Clarified reservation compatibility for older running Revit hosts. Work-scope
+  status now reports confirmed unsupported functionality explicitly; approved
+  legacy work does not need a reservation exception. Real coordination, target
+  and transport failures remain errors and never trigger a silent downgrade.
+- Added explicit Windows User `REVIT_MCP_SCRIPT_APPROVAL=auto/prompt` for
+  Revit query/modify scripts. Default remains per-script confirmation; user
+  changes apply on the next request without restart. Responses identify
+  automatic approval, and prompt cancellation is distinguished from No.
+- Added `revit_work_scope` for host-enforced multi-agent assignments, overlap
+  rejection, lease expiry and stale model evidence checks. Disjoint element
+  scopes permit built-in instance Comments/Mark edits; other side effects need
+  exclusive document scope. Reservations enable fail-closed coordination until
+  explicitly disabled by a document-scope holder. Requires host restart.
 - Added project MCP configs for Grok CLI / Orca (`.grok/config.toml`) and
   Claude Code / Codex (`.mcp.json`), both pointing `cad` and `revit` at the
   TypeScript stdio servers. Documented why `CadMCPServer.exe` must not be used

@@ -1,5 +1,13 @@
 # Revit MCP V2 — Agent Instructions
 
+## BIM modeling and review scope
+
+For BIM modeling, drawing review, or parameter corrections, read
+[the scoped BIM workflow](docs/BIM_WORKFLOW.md). Apply the user's current
+document, floor, category, and element scope explicitly. Local project evidence
+under `bim-standards/` and the output/review folders is private working data;
+keep historical facts separate from current model checks and public guidance.
+
 ## Architecture
 
 3-layer architecture: **MCP Server (TypeScript)** ↔ **WebSocket** ↔ **Revit Plugin (C#)** + **CommandSet (C#)**.
@@ -339,9 +347,9 @@ automatically falls back to the Nice3point.Revit.Api NuGet packages.
 - [ ] Phase P3: WiX MSI installer + code signing
 - [x] Sprint 5 P0: worksharing metadata, linked-model discovery/query, and view image export
 
-## Tool Inventory (58 registered: Revit 43 + AutoCAD 15)
+## Tool Inventory (59 registered: Revit 44 + AutoCAD 15)
 
-The sections below enumerate the 43 Revit tools. The companion AutoCAD server
+The sections below enumerate the 44 Revit tools. The companion AutoCAD server
 registers 15 tools, summarized after the Revit inventory and documented in
 [`autocad/CLAUDE.md`](autocad/CLAUDE.md).
 
@@ -355,6 +363,28 @@ request carries the exact session and document fingerprint; the plugin checks bo
 on Revit's main thread immediately before dispatch. Switching the active document
 requires a fresh `revit_set_target`. A normally launched first Revit uses 8181 and
 additional processes auto-bind to 8183–8199; 8182 remains reserved for AutoCAD.
+
+### Coordination (1)
+- `revit_work_scope` — Host-owned exclusive reservations with status/acquire/renew/release/disable.
+  **Capability-gated, not a blanket requirement for every running plugin.**
+  A tool listed by TypeScript is not proof that the loaded Revit host supports it.
+  Check live `revit_ping`/`revit_work_scope op=status`; a missing ping capability
+  field is unknown until checked. An exact `Unknown command: 'work_scope'`
+  response (or normalized `supported=false`) establishes unsupported status.
+  On that host, continue already-authorized work using the existing workflow:
+  one model writer, pinned document/session, fresh reads, retry keys and post-write
+  verification. **Do not request exception approval solely because reservations
+  are unavailable.** Existing approved parameters, criteria and scope remain valid;
+  do not claim reservation protection. Supported but disabled coordination also
+  allows existing single-writer work; acquiring opts into coordination.
+  When coordination is enabled, acquire before reading data used to calculate
+  edits. Element scopes permit only built-in instance Comments/Mark writes;
+  other side effects require document scope. Conflict, stale/expired tokens,
+  target mismatch, connection errors and missing registries are NOT evidence of
+  unsupported functionality; never bypass those errors or auto-disable protection.
+  Release/expiry does not disable coordination. Separate MCP processes own tokens.
+  See `docs/WORK_SCOPE_COORDINATION.md`; installation needs host restart, but
+  installing this optional feature is not a prerequisite for authorized legacy work.
 
 ### Utility (4)
 - `revit_ping` — Connection health check

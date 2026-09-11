@@ -41,6 +41,8 @@ export interface CommandExecutionOptions {
   // so command parameters remain an honest representation of the tool input.
   targetSessionId?: string;
   expectedDocumentFingerprint?: string;
+  agentId?: string;
+  workScopeToken?: string;
 }
 
 interface PendingRequest {
@@ -279,6 +281,8 @@ export class CadWebSocketClient {
       command,
       params: requestParams,
       timeout_ms: timeoutMs,
+      ...(options.agentId ? { agent_id: options.agentId } : {}),
+      ...(options.workScopeToken ? { work_scope_token: options.workScopeToken } : {}),
       ...(options.targetSessionId
         ? { target_session_id: options.targetSessionId }
         : {}),

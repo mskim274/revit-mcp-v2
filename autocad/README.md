@@ -36,6 +36,21 @@ AutoCAD API work is marshalled with
 transaction supplied by the plugin, which commits successful results and
 aborts failures.
 
+The host owns transaction cleanup through `TransactionBoundary`. Query scripts
+still abort on success; execution failures roll back through `Dispose` without
+calling `Abort` on a disposed native handle. Original exceptions are recorded
+before cleanup in `%LOCALAPPDATA%\AutoCADMCP\logs\errors-<PID>.jsonl` (2 MiB
+rotation, one previous file per process). Logs are local and may contain paths
+from exception messages; do not publish them without review. Failed cleanup
+returns `TRANSACTION_CLEANUP_ERROR` instead of claiming a confirmed rollback.
+This host change requires an AutoCAD restart, not a Revit restart.
+
+Transaction-lifecycle regression tests, without launching CAD:
+
+```powershell
+dotnet run --project tests/AutoCadTransactionSmoke -c Release
+```
+
 ## Requirements
 
 - AutoCAD 2025
@@ -68,6 +83,25 @@ dotnet build autocad\AutoCADMCP.sln -c Release
 ```
 
 ## Load and connect
+
+Script execution loads Roslyn in a private `AssemblyLoadContext`, because
+AutoCAD 2025 may provide older `Microsoft.CodeAnalysis` assemblies. Deploy the
+build's **script-engine/** subfolder along with the host and CommandSet. It
+contains `AutoCADMCP.ScriptEngine.dll` and its four Roslyn DLLs. Do not replace
+DLLs in the Autodesk installation directory. The host/CommandSet has no direct
+Roslyn reference; Autodesk API objects and command contracts retain host type
+identity, including in Roslyn's generated submissions. This is dependency
+version isolation, not a security sandbox. Updating these binaries requires
+AutoCAD to be closed; do not attempt to NETLOAD a second host into the same
+process.
+
+An offline regression test loads the installed host's Roslyn 4.0 alongside
+the private Roslyn 4.9. It uses CAD type stubs, so it does not replace live CAD
+verification:
+
+```powershell
+dotnet run --project tests/AutoCadScriptIsolationSmoke -c Release -- "C:\Program Files\Autodesk\AutoCAD 2025"
+```
 
 There is not yet a public AutoCAD installer. The AutoCAD TypeScript server is
 also a private workspace package for now; it is built and package-tested in CI
